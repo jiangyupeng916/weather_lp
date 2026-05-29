@@ -69,25 +69,30 @@ class TestHeartbeatManagerLifecycle:
 
 class TestHeartbeatErrorHandling:
     def test_consecutive_errors_counted(self):
-        call_count = [0]
+        """SDK 和 raw heartbeat 都失败时，应累计错误并重试。"""
+        sdk_call_count = [0]
 
         def fail_then_succeed(current_id):
-            call_count[0] += 1
-            if call_count[0] <= 2:
+            sdk_call_count[0] += 1
+            if sdk_call_count[0] <= 2:
                 raise ConnectionError("network error")
             return {"heartbeat_id": "recovered"}
 
         client = MagicMock()
         client.post_heartbeat.side_effect = fail_then_succeed
 
-        cfg = _make_cfg()
-        hm = HeartbeatManager(client, cfg, "0xTestAddr", MockCreds())
-        hm._error_count = 0
-        hm.start()
-        time.sleep(0.5)
-        hm.stop()
+        # mock _raw_heartbeat 也失败（避免真实 HTTP 请求）
+        with patch.object(HeartbeatManager, '_raw_heartbeat', side_effect=ConnectionError("raw failed")) as mock_raw:
+            cfg = _make_cfg()
+            hm = HeartbeatManager(client, cfg, "0xTestAddr", MockCreds())
+            hm._error_count = 0
+            hm.start()
+            time.sleep(0.5)
+            hm.stop()
 
-        assert call_count[0] >= 3
+            # SDK 被调用多次（每次循环先尝试 SDK）
+            assert sdk_call_count[0] >= 3, f"预期 SDK 至少被调用 3 次，实际 {sdk_call_count[0]}"
+            assert mock_raw.called
 
     def test_fallback_to_raw_heartbeat(self):
         """SDK post_heartbeat 不可用时回退到原始 REST 请求"""

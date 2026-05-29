@@ -169,20 +169,23 @@ class WSManager:
             time.sleep(self._cfg.ws_reconnect_delay)
 
     def _ws_on_open(self, ws, on_open_cb, ping_interval: float):
-        # 启动 ping 线程
+        # 先执行业务回调（发送 auth/订阅），再启动 ping
+        try:
+            on_open_cb(ws)
+        except Exception as e:
+            logger.error("[WS] on_open 异常: %s", e)
+
+        # 启动 ping 线程（先 sleep 再发，避免刚连上就发 PING 导致服务器拒绝）
         def _ping():
             while self._running:
+                time.sleep(ping_interval)
+                if not self._running:
+                    break
                 if not ws.sock or not getattr(ws.sock, "connected", False):
                     break
                 try:
                     ws.send("PING")
                 except Exception:
                     break
-                time.sleep(ping_interval)
 
         threading.Thread(target=_ping, daemon=True, name="ws-ping").start()
-        # 调用业务回调
-        try:
-            on_open_cb(ws)
-        except Exception as e:
-            logger.error("[WS] on_open 异常: %s", e)
