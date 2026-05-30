@@ -124,6 +124,8 @@ class AssetActor:
             EventType.COOLDOWN_EXPIRED: self._on_cooldown_expired,
             EventType.EXTERNAL_CANCEL: self._on_external_cancel,
             EventType.ORDER_PLACED: self._on_order_placed,
+            EventType.CANCEL_DONE: self._on_cancel_done,
+            EventType.PLACE_DONE: self._on_place_done,
         }
         fn = handlers.get(evt.type)
         if fn:
@@ -222,8 +224,9 @@ class AssetActor:
             self.guardian.exec_layer.cancel(self.active_id, "停止守护")
         self._to(ActorState.STOPPED, "已停止")
 
-    def _on_audit(self, _p: dict):
+    def _on_audit(self, p: dict):
         now = time.time()
+        orders_map: dict = p.get("orders", {})
 
         # 卡死的 PLACING/CANCELING 状态重置
         if self.state in (ActorState.CANCELING, ActorState.PLACING) and (now - self.state_at) > self.cfg.stale_timeout:
@@ -236,18 +239,14 @@ class AssetActor:
             self._start_cooldown()
             return
 
-        # RESTING 状态验证订单仍存在
+        # RESTING 状态验证订单仍存在（使用 Guardian 传入的订单映射，避免重复 API 调用）
         if self.state is ActorState.RESTING and self.active_id:
-            try:
-                orders = self.guardian.open_orders()
-                if not any(o.order_id == self.active_id for o in orders):
-                    logger.warning("[AUDIT] %s 订单丢失纠偏", self.asset_id[:16])
-                    self.active_id = None
-                    self.active_price = None
-                    self._to(ActorState.NO_ORDER, "审计纠偏-订单丢失")
-                    self._start_cooldown()
-            except Exception as e:
-                logger.error("[AUDIT] 查询失败: %s", e)
+            if self.active_id not in orders_map:
+                logger.warning("[AUDIT] %s 订单丢失纠偏", self.asset_id[:16])
+                self.active_id = None
+                self.active_price = None
+                self._to(ActorState.NO_ORDER, "审计纠偏-订单丢失")
+                self._start_cooldown()
 
         # NO_ORDER/COOLING 卡死强制重挂
         if self.state in (ActorState.NO_ORDER, ActorState.COOLING) and (now - self.state_at) > self.cfg.stale_timeout:
@@ -307,23 +306,28 @@ class AssetActor:
         self._to(ActorState.CANCELING, f"{oid[:20]}... | {reason}")
 
         fut = self.guardian.exec_layer.cancel(oid, reason)
-        threading.Thread(target=self._handle_cancel_result, args=(fut, oid, reason), daemon=True).start()
+        # 回调线程 post 结果回事件队列，不直接修改状态
+        def _on_done():
+            try:
+                ok = fut.result(timeout=self.cfg.cancel_timeout)
+            except Exception as e:
+                ok = False
+                logger.error("[CANCEL FUT] 超时: %s", e)
+            self.post(ActorEvent(EventType.CANCEL_DONE, {"order_id": oid, "ok": ok, "reason": reason}))
 
-    def _handle_cancel_result(self, fut: Future, oid: str, reason: str):
-        try:
-            ok = fut.result(timeout=self.cfg.cancel_timeout)
-        except Exception as e:
-            ok = False
-            logger.error("[CANCEL FUT] 超时: %s", e)
+        threading.Thread(target=_on_done, daemon=True).start()
+
+    def _on_cancel_done(self, p: dict):
+        oid = p.get("order_id", "")
+        ok = p.get("ok", False)
+        reason = p.get("reason", "")
 
         if not ok:
             logger.error("[CANCEL FAIL] %s 订单仍存活在交易所！保持 RESTING", oid[:20])
-            # P0 修复：撤单失败不清除 active_id，保持 RESTING 状态
             self._pending_reeval = False
             self._to(ActorState.RESTING, "撤单失败-订单仍存活")
             return
 
-        # 撤单成功
         self.active_id = None
         self.active_price = None
         self._pending_reeval = False
@@ -335,20 +339,29 @@ class AssetActor:
         self._to(ActorState.PLACING, f"target={target}")
 
         fut = self.guardian.exec_layer.place(self.asset_id, target, self.cfg.maker_size, self.tick_size)
-        threading.Thread(target=self._handle_place_result, args=(fut, target), daemon=True).start()
+        def _on_done():
+            try:
+                oid = fut.result(timeout=self.cfg.cancel_timeout)
+            except Exception as e:
+                oid = None
+                logger.error("[PLACE FUT] 超时: %s", e)
+            self.post(ActorEvent(EventType.PLACE_DONE, {
+                "order_id": oid or "", "price": target, "ok": oid is not None,
+            }))
 
-    def _handle_place_result(self, fut: Future, target: Decimal):
-        try:
-            oid = fut.result(timeout=self.cfg.cancel_timeout)
-        except Exception as e:
-            oid = None
-            logger.error("[PLACE FUT] 超时: %s", e)
+        threading.Thread(target=_on_done, daemon=True).start()
 
-        if oid:
+    def _on_place_done(self, p: dict):
+        oid = p.get("order_id", "")
+        target = p.get("price")
+        ok = p.get("ok", False)
+
+        if ok and oid:
             self.active_id = oid
             self.active_price = target
             self._to(ActorState.RESTING, f"{oid[:20]}... price={target}")
-            self.guardian.exec_layer.clear_place(self.asset_id, target)
+            if target is not None:
+                self.guardian.exec_layer.clear_place(self.asset_id, target)
             if self._pending_reeval:
                 self._pending_reeval = False
                 self._cancel("best_bid变化(下单后)")

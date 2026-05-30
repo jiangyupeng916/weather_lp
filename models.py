@@ -31,6 +31,9 @@ class EventType(Enum):
     COOLDOWN_EXPIRED = auto()
     EXTERNAL_CANCEL = auto()
     ORDER_PLACED = auto()
+    # 内部事件：异步操作结果回传
+    CANCEL_DONE = auto()   # payload: {order_id, ok, reason}
+    PLACE_DONE = auto()    # payload: {order_id, price, ok}
 
 
 @dataclass

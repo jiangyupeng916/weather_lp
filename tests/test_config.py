@@ -19,7 +19,7 @@ class TestConfigDefaults:
         cfg = Config()
         assert cfg.maker_size == Decimal("50")
         assert cfg.maker_rank == 3
-        assert cfg.maker_cooldown == 360.0
+        assert cfg.maker_cooldown == 120.0  # V7 默认 120s（V6 是 360s）
 
     def test_default_heartbeat(self):
         cfg = Config()

@@ -41,7 +41,7 @@ class Config:
     # ── Maker 挂单策略 ────────────────────────────────────────────────────────
     maker_size: Decimal = Decimal("50")
     maker_rank: int = 3
-    maker_cooldown: float = 360.0
+    maker_cooldown: float = 120.0
     tick_size: Decimal = Decimal("0.01")
 
     # ── 执行层限流与重试 ──────────────────────────────────────────────────────

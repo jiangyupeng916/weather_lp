@@ -186,11 +186,10 @@ class TestGuardianOrderEvents:
             assert g.get_actor("asset_1") is None
 
     def test_handle_order_manual_cancel(self):
-        """人工撤单应触发 abandon 检查"""
+        """人工撤单应通知 Actor 重挂，不直接放弃市场（P0 修复）"""
         cfg = _make_cfg(cooldown_delay=0.01)
         with patch('guardian.ClobClient'), \
-             patch('guardian.Account.from_key', return_value=MagicMock(address="0xTest")), \
-             patch.object(Guardian, 'open_orders', return_value=[]):
+             patch('guardian.Account.from_key', return_value=MagicMock(address="0xTest")):
             g = Guardian(cfg)
             mock_actor = MagicMock()
             mock_actor.state = ActorState.RESTING
@@ -205,8 +204,13 @@ class TestGuardianOrderEvents:
             })
             time.sleep(0.2)
 
-            # open_orders 返回空 → 应 abandon
-            assert g.get_actor("asset_1") is None
+            # P0 修复：不再直接放弃，而是通知 Actor 处理撤单
+            # Actor 仍在（由 discover 多周期检测负责清理）
+            assert g.get_actor("asset_1") is not None
+            # 应收到 EXTERNAL_CANCEL 事件
+            mock_actor.post.assert_called()
+            call_args = mock_actor.post.call_args[0][0]
+            assert call_args.type == EventType.EXTERNAL_CANCEL
 
 
 class TestGuardianSellPosition:
