@@ -64,9 +64,9 @@ class WSRouter:
             }))
         elif etype == "market_resolved":
             logger.warning("[RESOLVED] %s 停止守护", aid[:20])
-            self._guardian.remove_actor(aid)
             if actor:
                 actor.stop(cancel_active=True)
+            self._guardian.remove_actor(aid)
 
     # ── 用户频道消息 ──────────────────────────────────────────────────────────
     def on_user_message(self, _ws, raw: str):
@@ -87,9 +87,7 @@ class WSRouter:
         elif etype == "order":
             self._guardian.handle_order(data)
         elif data.get("channel") == "user":
+            # 初始 dump：路由所有历史交易到 handle_trade 正常处理
             for t in data.get("data", []):
-                if "maker_orders" not in t and "matched_amount" not in t:
-                    continue
-                tid = t.get("id", "")
-                if tid and str(t.get("status", "")) == "CONFIRMED":
-                    self._guardian.mark_trade_processed(tid)
+                if t.get("id") and t.get("side") and t.get("asset_id"):
+                    self._guardian.handle_trade(t)

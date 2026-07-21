@@ -153,6 +153,8 @@ class ExecutionLayer:
                 if attempt < self._cfg.place_retries:
                     time.sleep(self._cfg.place_retry_delay)
                 else:
+                    with self._lock_place:
+                        self._place_tokens.pop(token, None)
                     fut.set_result(None)
 
     # ── 市价卖出 ──────────────────────────────────────────────────────────────
@@ -173,6 +175,34 @@ class ExecutionLayer:
             fut.set_result(res)
         except Exception as e:
             logger.error("[SELL FAIL] %s... | %s", asset_id[:20], e)
+            fut.set_result(None)
+
+    # ── 限价卖单 ──────────────────────────────────────────────────────────────
+    def limit_sell(self, asset_id: str, price: float, size: float, tick_size: Decimal) -> Future:
+        """异步下限价卖单，返回 Future[Optional[str]]（order_id 或 None）。"""
+        fut: Future = Future()
+        self._executor.submit(self._do_limit_sell, asset_id, price, size, tick_size, fut)
+        return fut
+
+    def _do_limit_sell(self, asset_id: str, price: float, size: float, tick_size: Decimal, fut: Future):
+        self._rate_wait()
+        try:
+            res = self._client.create_and_post_order(
+                order_args=OrderArgs(
+                    token_id=asset_id,
+                    price=price,
+                    size=size,
+                    side="SELL",
+                ),
+                options=PartialCreateOrderOptions(tick_size=str(tick_size)),
+            )
+            order_id = res.get("orderID") or res.get("order_id")
+            logger.info("[LIMIT SELL OK] %s... price=%s size=%s id=%s",
+                        asset_id[:16], price, size, str(order_id)[:20] if order_id else "N/A")
+            fut.set_result(order_id)
+        except Exception as e:
+            logger.error("[LIMIT SELL FAIL] %s... price=%s size=%s | %s",
+                         asset_id[:16], price, size, e)
             fut.set_result(None)
 
     # ── 令牌管理 ──────────────────────────────────────────────────────────────

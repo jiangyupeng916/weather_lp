@@ -78,8 +78,9 @@ class HeartbeatManager:
             self._update_id(resp)
             logger.debug("[HEARTBEAT] OK id=%s", str(self._heartbeat_id)[:16])
             return
-        except Exception:
-            pass
+        except Exception as e:
+            # 尝试从 SDK 错误中恢复 heartbeat_id（SDK 400 响应体包含正确 ID）
+            self._try_recover_sdk_error(e)
 
         # SDK 失败 → 回退到原始 REST（L2 认证头）
         try:
@@ -87,13 +88,38 @@ class HeartbeatManager:
             self._update_id(resp)
             logger.debug("[HEARTBEAT] OK (raw) id=%s", str(self._heartbeat_id)[:16])
         except requests.HTTPError as e:
-            self._handle_400(e)
+            self._handle_http_error(e)
         except Exception:
             raise
 
-    def _handle_400(self, e: requests.HTTPError):
-        """处理 400 响应：服务器可能返回了正确的 heartbeat_id。"""
-        if e.response is None or e.response.status_code != 400:
+    def _try_recover_sdk_error(self, e: Exception):
+        """从 SDK 异常中尝试提取 heartbeat_id。
+        SDK 在收到 400 时会在日志/异常中暴露响应体 {"heartbeat_id":"xxx","error_msg":"..."}
+        """
+        import re
+        msg = str(e)
+        m = re.search(r'"heartbeat_id"\s*:\s*"([a-f0-9-]+)"', msg)
+        if m:
+            new_id = m.group(1)
+            with self._lock:
+                old = self._heartbeat_id
+                self._heartbeat_id = new_id
+            logger.info(
+                "[HEARTBEAT] 从 SDK 错误恢复 heartbeat_id: %s (旧: %s)",
+                new_id[:16], old[:16] if old else "空",
+            )
+
+    def _handle_http_error(self, e: requests.HTTPError):
+        """处理 HTTP 错误响应。
+        - 400：服务器返回了正确的 heartbeat_id，更新本地状态
+        - 401/403：认证失败，直接抛出
+        """
+        if e.response is None:
+            raise e
+        sc = e.response.status_code
+        if sc in (401, 403):
+            raise e
+        if sc != 400:
             raise e
         try:
             body = e.response.json()
@@ -106,8 +132,8 @@ class HeartbeatManager:
                 old = self._heartbeat_id
                 self._heartbeat_id = correct_id
             logger.info(
-                "[HEARTBEAT] 从 400 响应恢复 heartbeat_id: %s (旧: %s)",
-                correct_id[:16], old[:16] if old else "空",
+                "[HEARTBEAT] 从 %d 响应恢复 heartbeat_id: %s (旧: %s)",
+                sc, correct_id[:16], old[:16] if old else "空",
             )
         else:
             raise e

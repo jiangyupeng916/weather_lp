@@ -38,7 +38,7 @@ from py_clob_client_v2 import (
 
 from config import Config
 from models import ActorState, EventType, ActorEvent, OrderInfo, MarketInfo
-from utils import safe_float, safe_decimal, retry_call
+from utils import safe_float, safe_decimal, retry_call, round_to_tick, safe_float_from_decimal
 from heartbeat import HeartbeatManager
 from execution import ExecutionLayer
 from actor import AssetActor
@@ -342,9 +342,10 @@ class Guardian:
                 self._abandon_pending.clear()
             else:
                 # 检查每个当前无买单的 Actor，累计计数
+                # 注意：COOLING 状态不计数 — Actor 有定时器在等待重挂，不应被放弃
                 for aid in self.list_actor_ids():
                     actor = self.get_actor(aid)
-                    if actor and actor.state in (ActorState.NO_ORDER, ActorState.COOLING) and not actor.active_id:
+                    if actor and actor.state == ActorState.NO_ORDER and not actor.active_id:
                         self._abandon_pending[aid] = self._abandon_pending.get(aid, 0) + 1
                         if self._abandon_pending[aid] >= self.ABANDON_CYCLES:
                             logger.info("[ABANDON] %s 连续 %d 次无买单，放弃守护", aid[:20], self._abandon_pending[aid])
@@ -449,6 +450,17 @@ class Guardian:
         asset_id = data.get("asset_id") or data.get("token_id", "")
         price = safe_float(data.get("price", 0))
         side = str(data.get("side", "")).upper()
+        outcome = data.get("outcome", "")
+
+        with self._trade_lock:
+            if tid in self._processed_trades:
+                return
+
+        logger.info("[TRADE] id=%s status=%s side=%s", tid[:16], status, side)
+
+        if not asset_id or side != "BUY":
+            return
+
         maker_orders = data.get("maker_orders") or []
         our_fill = sum(
             safe_float(m.get("matched_amount", 0))
@@ -456,19 +468,23 @@ class Guardian:
             if (m.get("owner") or m.get("order_owner", "")) == self.cfg.api_key
         )
 
-        logger.info("[TRADE] id=%s status=%s side=%s our_fill=%.4f", tid[:16], status, side, our_fill)
+        # CONFIRMED 事件可能不包含 maker_orders → 从 _pending_sells 恢复
+        if status == "CONFIRMED" and our_fill <= 0:
+            with self._pending_sells_lock:
+                pending = self._pending_sells.get(tid)
+            if pending:
+                our_fill = pending["fill_size"]
+                price = pending["price"]
+                outcome = pending["outcome"]
+                logger.info("[TRADE] CONFIRMED 从缓存恢复 our_fill=%.4f", our_fill)
 
-        if not asset_id or our_fill <= 0 or side != "BUY":
+        if our_fill <= 0:
             return
 
-        with self._trade_lock:
-            if tid in self._processed_trades:
-                return
-
         if status == "MATCHED":
-            self._on_trade_matched(tid, asset_id, our_fill, price, data.get("outcome", ""), maker_orders)
+            self._on_trade_matched(tid, asset_id, our_fill, price, outcome, maker_orders)
         elif status == "CONFIRMED":
-            self._on_trade_confirmed(tid, asset_id, our_fill, price, data.get("outcome", ""))
+            self._on_trade_confirmed(tid, asset_id, our_fill, price, outcome)
         elif status in ("FAILED", "RETRYING"):
             self._on_trade_failed(tid)
 
@@ -517,13 +533,42 @@ class Guardian:
     def _process_trade_sell(self, trade_id: str, asset_id: str, fill_size: float, price: float, outcome: str):
         mi = self.market_info(asset_id)
         title = mi.get("title", "未知")
-        logger.info("[CONFIRMED SELL] %s | %s | 成交:%.4f | price=%s", title[:40], outcome, fill_size, price)
+        logger.info("[CONFIRMED BUY] %s | %s | 成交:%.4f | price=%s", title[:40], outcome, fill_size, price)
         if fill_size <= 0:
             return
-        self.sell_position(asset_id, {
-            "trade_id": trade_id, "token_id": asset_id, "side": "BUY",
-            "size": fill_size, "price": price, "title": title, "outcome": outcome,
-        })
+
+        # CONFIRMED = 链上已最终结算，余额已到账，直接下限价卖单
+        sell_price = safe_float_from_decimal(
+            round_to_tick(Decimal(str(price)), self.cfg.tick_size)
+        )
+        logger.info("[LIMIT SELL] %s 挂限价卖单 price=%s size=%.4f", asset_id[:20], sell_price, fill_size)
+        fut = self.exec_layer.limit_sell(asset_id, sell_price, fill_size, self.cfg.tick_size)
+        try:
+            sell_oid = fut.result(timeout=self.cfg.cancel_timeout)
+        except Exception:
+            sell_oid = None
+
+        if sell_oid:
+            trade_logger.info(json.dumps({
+                "buy": {
+                    "trade_id": trade_id, "token_id": asset_id, "side": "BUY",
+                    "size": fill_size, "price": price, "title": title, "outcome": outcome,
+                },
+                "sell": {
+                    "order_id": sell_oid, "token_id": asset_id, "side": "SELL",
+                    "size": fill_size, "price": sell_price,
+                },
+            }, ensure_ascii=False))
+            logger.info("[LIMIT SELL OK] %s id=%s", asset_id[:20], str(sell_oid)[:20])
+        else:
+            trade_logger.error(json.dumps({
+                "buy": {
+                    "trade_id": trade_id, "token_id": asset_id, "side": "BUY",
+                    "size": fill_size, "price": price, "title": title, "outcome": outcome,
+                },
+                "sell": {"status": "FAILED", "error": "limit_sell 返回 None"},
+            }, ensure_ascii=False))
+            logger.error("[LIMIT SELL FAIL] %s 限价卖单下单失败", asset_id[:20])
 
     # ── 订单事件 ──────────────────────────────────────────────────────────────
     def handle_order(self, data: dict):
@@ -535,6 +580,10 @@ class Guardian:
         if otype == "CANCELLATION":
             if self.exec_layer.is_system_cancel(oid):
                 logger.info("[CANCEL] 系统撤单确认 %s", oid[:20])
+                cancel_logger.info(json.dumps({
+                    "order_id": oid, "asset_id": asset_id, "side": side,
+                    "source": "system", "reason": "bot主动撤单确认",
+                }, ensure_ascii=False))
                 if asset_id and side == "BUY":
                     actor = self.get_actor(asset_id)
                     if actor:
@@ -542,30 +591,35 @@ class Guardian:
                 return
 
             logger.info("[MANUAL CANCEL] 人工撤单 %s asset=%s", oid[:20], asset_id[:20])
+            cancel_logger.info(json.dumps({
+                "order_id": oid, "asset_id": asset_id, "side": side,
+                "source": "manual", "reason": "人工撤单-将放弃市场",
+            }, ensure_ascii=False))
             if side != "BUY" or not asset_id:
                 return
             threading.Thread(target=self._check_abandon, args=(oid, asset_id), daemon=True).start()
 
     def _check_abandon(self, oid: str, asset_id: str):
-        """处理非系统发起的撤单事件。
+        """处理非系统发起的撤单事件（人工撤单）。
 
-        关键修复：不再因单次撤单事件就放弃市场。
-        - 交易所自动取消（心跳超时）会导致所有订单同时被取消，
-          不应该被误解为"人工放弃"。
-        - 始终通知 Actor 处理撤单 → 冷却 → 重新挂单。
-        - 真正的"放弃"由 discover() 多周期检测（连续 N 次无买单）。
+        人工撤单 = 用户主动放弃该市场，不再守护。
+        与交易所自动取消（心跳超时）的区别：
+        - 人工撤单：单个订单被取消 → 放弃该市场
+        - 系统撤单：best_bid 变化等 → 冷却后重挂（由 _cancel 流程处理）
         """
         time.sleep(self.cfg.cooldown_delay)
         if not self.running:
             return
         try:
-            actor = self.get_actor(asset_id)
+            actor = self.remove_actor(asset_id)
+            self._abandon_pending.pop(asset_id, None)
             if actor:
-                # 通知 Actor 发生了外部撤单，让 Actor 自行冷却+重挂
-                logger.info("[MANUAL CANCEL] 已通知 Actor 重挂 %s", asset_id[:20])
-                actor.post(ActorEvent(EventType.EXTERNAL_CANCEL, {"order_id": oid}))
+                logger.info("[MANUAL CANCEL] 放弃市场 %s", asset_id[:20])
+                mi = self.market_info(asset_id)
+                msg = f"asset_id={asset_id} | order_id={oid} | title={mi.get('title','未知')[:50]} | reason=人工撤单"
+                abandon_logger.info(msg)
+                actor.stop(cancel_active=False)
             else:
-                # Actor 不存在（已被清理），忽略
                 logger.info("[MANUAL CANCEL] Actor 不存在，忽略 %s", asset_id[:20])
         except Exception as e:
             logger.error("[ABANDON CHECK] 失败: %s", e)
@@ -589,26 +643,71 @@ class Guardian:
         pos_list = self.positions()
         if not pos_list:
             return
+
+        orders = self.open_orders()
+        sell_tokens = {o.token_id for o in orders if o.side.upper() == "SELL"}
+
         logger.info("[POSITION] 发现 %d 个持仓", len(pos_list))
-        sold = 0
+        placed = 0
         for p in pos_list:
             tid = p.get("asset", "")
+            if not tid:
+                continue
+
+            # 已有卖单挂着 → 跳过
+            if tid in sell_tokens:
+                continue
+
             with self._sell_lock:
                 if tid in self._selling:
                     continue
-            bal = self.onchain_balance(tid)
-            if bal > self.cfg.position_threshold:
-                logger.info("[POLL SELL] %s | %.4f", p.get("title", "未知")[:40], bal)
-                self.sell_position(tid, {
-                    "token_id": tid, "size": bal,
-                    "price": safe_float(p.get("avgPrice", 0)),
-                    "title": p.get("title", ""), "outcome": p.get("outcome", ""),
-                    "source": "polling",
-                })
-                sold += 1
-                time.sleep(0.3)
-        if sold:
-            logger.info("[POSITION] 兜底卖出 %d 个", sold)
+                self._selling.add(tid)
+
+            try:
+                bal = self.onchain_balance(tid)
+                if bal <= self.cfg.position_threshold:
+                    continue
+
+                price = safe_float(p.get("avgPrice", 0))
+                if price <= 0:
+                    continue
+
+                sell_price = safe_float_from_decimal(
+                    round_to_tick(Decimal(str(price)), self.cfg.tick_size)
+                )
+                logger.info("[POLL SELL] %s | %.4f @ %s", p.get("title", "未知")[:40], bal, sell_price)
+
+                fut = self.exec_layer.limit_sell(tid, sell_price, bal, self.cfg.tick_size)
+                try:
+                    sell_oid = fut.result(timeout=self.cfg.cancel_timeout)
+                except Exception:
+                    sell_oid = None
+
+                if sell_oid:
+                    trade_logger.info(json.dumps({
+                        "buy": {
+                            "token_id": tid, "side": "BUY",
+                            "size": bal, "price": price,
+                            "title": p.get("title", ""), "outcome": p.get("outcome", ""),
+                            "source": "polling",
+                        },
+                        "sell": {
+                            "order_id": sell_oid, "token_id": tid, "side": "SELL",
+                            "size": bal, "price": sell_price,
+                        },
+                    }, ensure_ascii=False))
+                    logger.info("[POLL SELL OK] %s id=%s", tid[:20], str(sell_oid)[:20])
+                    placed += 1
+                else:
+                    logger.error("[POLL SELL FAIL] %s 限价卖单下单失败", tid[:20])
+            finally:
+                with self._sell_lock:
+                    self._selling.discard(tid)
+
+            time.sleep(0.3)
+
+        if placed:
+            logger.info("[POSITION] 兜底限价卖单 %d 个", placed)
 
     # ── 缓存清理（P2 修复） ────────────────────────────────────────────────────
     def _prune_caches(self):

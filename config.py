@@ -40,7 +40,7 @@ class Config:
 
     # ── Maker 挂单策略 ────────────────────────────────────────────────────────
     maker_size: Decimal = Decimal("50")
-    maker_rank: int = 3
+    maker_rank: int = 2
     maker_cooldown: float = 120.0
     tick_size: Decimal = Decimal("0.01")
 
@@ -55,7 +55,7 @@ class Config:
     # ── 定时任务间隔 ──────────────────────────────────────────────────────────
     discover_interval: float = 30.0
     audit_interval: float = 120.0
-    position_interval: float = 60.0
+    position_interval: float = 120.0
     cache_prune_interval: float = 300.0
     stale_timeout: float = 60.0
     cooldown_delay: float = 2.0

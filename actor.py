@@ -248,10 +248,9 @@ class AssetActor:
                 self._to(ActorState.NO_ORDER, "审计纠偏-订单丢失")
                 self._start_cooldown()
 
-        # NO_ORDER/COOLING 卡死强制重挂
-        if self.state in (ActorState.NO_ORDER, ActorState.COOLING) and (now - self.state_at) > self.cfg.stale_timeout:
-            logger.warning("[AUDIT] %s 状态卡死强制重挂", self.asset_id[:16])
-            self._to(ActorState.NO_ORDER, "审计强制重挂")
+        # NO_ORDER 卡死强制重挂（COOLING 有定时器，不在此检测）
+        if self.state == ActorState.NO_ORDER and (now - self.state_at) > self.cfg.stale_timeout:
+            logger.warning("[AUDIT] %s NO_ORDER 卡死强制重挂", self.asset_id[:16])
             self._start_cooldown()
 
     def _on_cooldown_expired(self, _p: dict):
@@ -323,6 +322,10 @@ class AssetActor:
         reason = p.get("reason", "")
 
         if not ok:
+            if self.active_id is None:
+                # active_id 已被外部撤单清除，订单已不存在，忽略取消失败
+                logger.warning("[CANCEL FAIL] %s 订单已不存在，忽略取消失败", oid[:20])
+                return
             logger.error("[CANCEL FAIL] %s 订单仍存活在交易所！保持 RESTING", oid[:20])
             self._pending_reeval = False
             self._to(ActorState.RESTING, "撤单失败-订单仍存活")
@@ -331,6 +334,10 @@ class AssetActor:
         self.active_id = None
         self.active_price = None
         self._pending_reeval = False
+        # 如果外部撤单已先处理（已在 COOLING），不重复启动冷却
+        if self.state is ActorState.COOLING:
+            logger.info("[CANCEL OK] %s 外部已处理，保持 COOLING", oid[:20])
+            return
         self._to(ActorState.NO_ORDER, f"撤单成功 | {reason}")
         self._start_cooldown()
 
@@ -369,6 +376,8 @@ class AssetActor:
             self.active_id = None
             self.active_price = None
             self._to(ActorState.NO_ORDER, "下单失败")
+            if target is not None:
+                self.guardian.exec_layer.clear_place(self.asset_id, target)
             self._start_cooldown()
 
     # ── 冷却 ──────────────────────────────────────────────────────────────────
