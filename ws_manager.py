@@ -101,12 +101,13 @@ class WSManager:
             self._market_thread.start()
 
     def market_send(self, data: dict):
-        ws = self._market_ws
-        if ws and ws.sock and getattr(ws.sock, "connected", False):
-            try:
-                ws.send(json.dumps(data))
-            except Exception as e:
-                logger.error("[MKT WS] 发送失败: %s", e)
+        with self._market_lock:
+            ws = self._market_ws
+            if ws and ws.sock and getattr(ws.sock, "connected", False):
+                try:
+                    ws.send(json.dumps(data))
+                except Exception as e:
+                    logger.error("[MKT WS] 发送失败: %s", e)
 
     # ── 用户频道 ──────────────────────────────────────────────────────────────
     def start_user(
@@ -153,9 +154,11 @@ class WSManager:
             )
 
             if label == "market":
-                self._market_ws = app
+                with self._market_lock:
+                    self._market_ws = app
             else:
-                self._user_ws = app
+                with self._user_lock:
+                    self._user_ws = app
 
             try:
                 app.run_forever(**self._ws_kwargs)

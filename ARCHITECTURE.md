@@ -192,12 +192,9 @@ User WS trade 事件
 | `place(asset_id, price, size, tick_size)` | 下限价买单（BUY） | `Future[Optional[str]]` order_id |
 | `cancel(order_id, reason)` | 撤单 | `Future[bool]` |
 | `limit_sell(asset_id, price, size, tick_size)` | 下限价卖单（SELL, GTC） | `Future[Optional[str]]` order_id |
-| `market_sell(asset_id, amount, order_type)` | 市价卖出（FOK/FAK） | `Future[Optional[dict]]` |
 | `clear_place(asset_id, price)` | 清除下单幂等 token | — |
 | `clear_place_by_asset(asset_id)` | 清除某资产全部下单 token | — |
 | `is_system_cancel(order_id)` | 判断是否为系统撤单（一次性） | bool |
-
-`market_sell` 保留用于应急手动调用，主流程不使用。
 
 ### 3.6 actor.py — 单市场状态机
 
@@ -478,7 +475,7 @@ guardian_v7/
 ├── models.py         # 模型：ActorState(6状态)、EventType(13事件)、OrderInfo、TradeRecord 等
 ├── utils.py          # 工具：safe_float/safe_decimal 安全转换、round_to_tick 价格对齐、retry_call 重试
 ├── heartbeat.py      # 心跳：HeartbeatManager 守护线程，SDK→raw REST 双重保障，heartbeat_id 链式恢复
-├── execution.py      # 执行层：全局限流 + 幂等令牌 + ThreadPoolExecutor，place/cancel/limit_sell/market_sell
+├── execution.py      # 执行层：全局限流 + 幂等令牌 + ThreadPoolExecutor，place/cancel/limit_sell
 ├── actor.py          # Actor：单市场串行状态机，事件队列驱动，异步回调 → 内部事件回传
 ├── ws_manager.py     # WS 管理：市场/用户双频道，单线程重连，代理支持，PING 保活
 ├── ws_router.py      # WS 路由：JSON 解析 → Guardian 分发，initial_dump 完整处理

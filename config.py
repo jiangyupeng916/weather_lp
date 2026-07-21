@@ -40,7 +40,7 @@ class Config:
 
     # ── Maker 挂单策略 ────────────────────────────────────────────────────────
     maker_size: Decimal = Decimal("50")
-    maker_rank: int = 2
+    maker_rank: int = 3
     maker_cooldown: float = 120.0
     tick_size: Decimal = Decimal("0.01")
 
@@ -48,8 +48,6 @@ class Config:
     exec_interval: float = 0.2
     place_retries: int = 2
     place_retry_delay: float = 1.0
-    sell_retries: int = 8
-    sell_order_type: str = "FOK"
     max_workers: int = 10
 
     # ── 定时任务间隔 ──────────────────────────────────────────────────────────
@@ -68,8 +66,6 @@ class Config:
 
     # ── 持仓卖出阈值 ──────────────────────────────────────────────────────────
     position_threshold: float = 1.0
-    balance_retries: int = 3
-    balance_delay: float = 2.0
 
     # ── WebSocket 连接 ────────────────────────────────────────────────────────
     ws_reconnect_delay: float = 5.0
@@ -80,11 +76,9 @@ class Config:
     heartbeat_interval: float = 7.0
     heartbeat_max_errors: int = 3
 
-    # ── 卖出回退链 ───────────────────────────────────────────────────────────
-    sell_fallback_order_types: tuple = ("FOK", "FAK")
-
-    # ── 暂停用户 / 取消全部 ──────────────────────────────────────────────────
+    # ── 超时 ────────────────────────────────────────────────────────────────
     cancel_timeout: float = 10.0
+    place_timeout: float = 15.0
 
     # ── 代理地址（WS） ────────────────────────────────────────────────────────
     proxy_url: Optional[str] = field(

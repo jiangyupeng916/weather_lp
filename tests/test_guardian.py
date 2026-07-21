@@ -6,6 +6,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import json
 import time
 from decimal import Decimal
 from unittest.mock import MagicMock, patch, PropertyMock
@@ -24,8 +25,6 @@ def _make_cfg(**overrides):
         "maker_size": Decimal("50"),
         "maker_rank": 3,
         "maker_cooldown": 360.0,
-        "balance_retries": 3,
-        "balance_delay": 0.01,
         "position_threshold": 1.0,
         "discover_interval": 0.5,
         "audit_interval": 0.5,
@@ -97,14 +96,6 @@ class TestGuardianActorManagement:
 
 
 class TestGuardianTradeHandling:
-    def test_mark_trade_processed(self):
-        cfg = _make_cfg()
-        with patch('guardian.ClobClient'), \
-             patch('guardian.Account.from_key', return_value=MagicMock(address="0xTest")):
-            g = Guardian(cfg)
-            g.mark_trade_processed("trade_001")
-            assert "trade_001" in g._processed_trades
-
     def test_handle_trade_not_buy_side_ignored(self):
         cfg = _make_cfg()
         with patch('guardian.ClobClient'), \
@@ -127,8 +118,9 @@ class TestGuardianTradeHandling:
         with patch('guardian.ClobClient'), \
              patch('guardian.Account.from_key', return_value=MagicMock(address="0xTest")):
             g = Guardian(cfg)
-            g.mark_trade_processed("trade_dup")
-            # 第二次应该被忽略
+            with g._trade_lock:
+                g._processed_trades["trade_dup"] = time.time()
+            # 已处理过的 trade 应被忽略
             g.handle_trade({
                 "id": "trade_dup",
                 "status": "MATCHED",
@@ -138,6 +130,65 @@ class TestGuardianTradeHandling:
                 "maker_orders": [{"owner": "test-key", "matched_amount": "5"}],
             })
             assert "trade_dup" not in g._pending_sells
+
+    def test_handle_trade_sell_confirmed_logged(self):
+        """Bug #4: 卖单 CONFIRMED 应记录到 trade_logger，不触发卖出动作"""
+        cfg = _make_cfg()
+        with patch('guardian.ClobClient'), \
+             patch('guardian.Account.from_key', return_value=MagicMock(address="0xTest")):
+            g = Guardian(cfg)
+            g.market_info = MagicMock(return_value={"title": "TestMarket", "outcome": "Yes"})
+
+            with patch('guardian.trade_logger') as mock_tl:
+                g.handle_trade({
+                    "id": "t_sell_ok",
+                    "status": "CONFIRMED",
+                    "asset_id": "asset_1",
+                    "side": "SELL",
+                    "price": "0.55",
+                    "outcome": "Yes",
+                    "maker_orders": [{"owner": "test-key", "matched_amount": "10"}],
+                })
+
+                # 应记录到 trade_logger
+                assert mock_tl.info.call_count == 1
+                logged = json.loads(mock_tl.info.call_args[0][0])
+                assert logged["sell_confirmed"]["token_id"] == "asset_1"
+                assert logged["sell_confirmed"]["size"] == 10.0
+                assert logged["sell_confirmed"]["price"] == 0.55
+
+            # 不应进入 _pending_sells（买单才进）
+            assert "t_sell_ok" not in g._pending_sells
+            # 应标记为已处理
+            assert "t_sell_ok" in g._processed_trades
+
+    def test_handle_trade_matched_dedup(self):
+        """Bug #5: MATCHED 事件重放时不应重复处理"""
+        cfg = _make_cfg()
+        with patch('guardian.ClobClient'), \
+             patch('guardian.Account.from_key', return_value=MagicMock(address="0xTest")):
+            g = Guardian(cfg)
+            mock_actor = MagicMock()
+            g.add_actor("asset_1", mock_actor)
+
+            trade_data = {
+                "id": "t_match",
+                "status": "MATCHED",
+                "asset_id": "asset_1",
+                "side": "BUY",
+                "price": "0.50",
+                "maker_orders": [{"owner": "test-key", "matched_amount": "5", "order_id": "o1"}],
+            }
+
+            # 第一次处理
+            g.handle_trade(trade_data)
+            assert "t_match" in g._pending_sells
+            assert mock_actor.post.call_count == 1
+
+            # WS 重连后重放第二次 → 应跳过
+            g.handle_trade(trade_data)
+            # post 不应再次被调用
+            assert mock_actor.post.call_count == 1
 
 
 class TestGuardianCachePrune:
@@ -186,66 +237,26 @@ class TestGuardianOrderEvents:
             assert g.get_actor("asset_1") is None
 
     def test_handle_order_manual_cancel(self):
-        """人工撤单应直接放弃市场，停止 Actor"""
+        """Bug #11: 非系统撤单统一走 Actor 通知 → 冷却重挂，不直接放弃市场"""
         cfg = _make_cfg(cooldown_delay=0.01)
         with patch('guardian.ClobClient'), \
              patch('guardian.Account.from_key', return_value=MagicMock(address="0xTest")):
             g = Guardian(cfg)
-            g.market_info = MagicMock(return_value={"title": "Test", "outcome": ""})
             mock_actor = MagicMock()
             mock_actor.state = ActorState.RESTING
-            mock_actor.active_id = "0xmanual_cancel"
+            mock_actor.active_id = "0xext_cancel"
             g.add_actor("asset_1", mock_actor)
 
             g.handle_order({
                 "type": "CANCELLATION",
-                "id": "0xmanual_cancel",
+                "id": "0xext_cancel",
                 "side": "BUY",
                 "asset_id": "asset_1",
             })
-            time.sleep(0.2)
 
-            # 人工撤单 → 直接放弃市场
-            assert g.get_actor("asset_1") is None
-            mock_actor.stop.assert_called_with(cancel_active=False)
-
-
-class TestGuardianSellPosition:
-    def test_balance_retry_loop(self):
-        """P1 修复：余额重试使用配置的次数"""
-        cfg = _make_cfg(balance_retries=3, balance_delay=0.01, position_threshold=1.0)
-        with patch('guardian.ClobClient'), \
-             patch('guardian.Account.from_key', return_value=MagicMock(address="0xTest")):
-            g = Guardian(cfg)
-            call_count = [0]
-
-            def mock_balance(token_id):
-                call_count[0] += 1
-                return 0.0  # 始终返回 0
-
-            g.onchain_balance = mock_balance
-
-            g.sell_position("asset_1")
-            # 余额为 0 时，应重试 balance_retries 次
-            assert call_count[0] == cfg.balance_retries, f"预期 {cfg.balance_retries} 次，实际 {call_count[0]}"
-
-
-class TestGuardianFOKSell:
-    def test_sell_zero_size(self):
-        cfg = _make_cfg()
-        with patch('guardian.ClobClient'), \
-             patch('guardian.Account.from_key', return_value=MagicMock(address="0xTest")):
-            g = Guardian(cfg)
-            result = g._sell("asset_1", 0.0)
-            assert result is False
-
-    def test_sell_duplicate_ignored(self):
-        """同一个 asset 不能并发卖出"""
-        cfg = _make_cfg()
-        with patch('guardian.ClobClient'), \
-             patch('guardian.Account.from_key', return_value=MagicMock(address="0xTest")):
-            g = Guardian(cfg)
-            g._selling.add("asset_1")
-            # 已经在 selling 集合中
-            result = g._sell("asset_1", 5.0)
-            assert result is False
+            # Actor 不应被移除，应收到 EXTERNAL_CANCEL 事件进入冷却重挂
+            assert g.get_actor("asset_1") is mock_actor
+            mock_actor.post.assert_called_once()
+            call_args = mock_actor.post.call_args[0][0]
+            assert call_args.type == EventType.EXTERNAL_CANCEL
+            assert call_args.payload["order_id"] == "0xext_cancel"

@@ -21,10 +21,8 @@ from typing import Dict, Optional, Set
 from py_clob_client_v2 import (
     ClobClient,
     OrderArgs,
-    MarketOrderArgs,
     OrderPayload,
     PartialCreateOrderOptions,
-    OrderType,
 )
 
 from config import Config
@@ -53,6 +51,10 @@ class ExecutionLayer:
         self._executor = ThreadPoolExecutor(
             max_workers=cfg.max_workers, thread_name_prefix="exec"
         )
+
+    def submit(self, fn, *args):
+        """复用执行层线程池提交任务，避免无限制创建线程。"""
+        return self._executor.submit(fn, *args)
 
     def shutdown(self, wait: bool = True):
         self._executor.shutdown(wait=wait)
@@ -100,9 +102,10 @@ class ExecutionLayer:
             logger.info("[CANCEL OK] %s... | %s", order_id[:20], reason)
             fut.set_result(True)
         except Exception as e:
+            # 仅清除 _cancel_tokens 允许重试；保留 _system_cancels
+            # 以便 WS 推送 CANCELLATION 时能正确识别为系统撤单（避免误判为人工撤单）
             with self._lock_cancel:
                 self._cancel_tokens.discard(order_id)
-                self._system_cancels.discard(order_id)
             logger.error("[CANCEL FAIL] %s... | %s", order_id[:20], e)
             fut.set_result(False)
 
@@ -145,37 +148,20 @@ class ExecutionLayer:
                     options=PartialCreateOrderOptions(tick_size=str(tick_size)),
                 )
                 order_id = res.get("orderID") or res.get("order_id")
-                logger.info("[PLACE OK] %s... price=%s id=%s", asset_id[:16], price, str(order_id)[:20] if order_id else "N/A")
-                fut.set_result(order_id)
-                return
+                if order_id:
+                    logger.info("[PLACE OK] %s... price=%s id=%s", asset_id[:16], price, str(order_id)[:20])
+                    fut.set_result(order_id)
+                    return
+                logger.error("[PLACE FAIL] %s... price=%s attempt=%d/%d | API 返回无 order_id: %s",
+                             asset_id[:16], price, attempt, self._cfg.place_retries, res)
             except Exception as e:
                 logger.error("[PLACE FAIL] %s... price=%s attempt=%d/%d | %s", asset_id[:16], price, attempt, self._cfg.place_retries, e)
-                if attempt < self._cfg.place_retries:
-                    time.sleep(self._cfg.place_retry_delay)
-                else:
-                    with self._lock_place:
-                        self._place_tokens.pop(token, None)
-                    fut.set_result(None)
-
-    # ── 市价卖出 ──────────────────────────────────────────────────────────────
-    def market_sell(self, asset_id: str, amount: float, order_type: OrderType) -> Future:
-        """异步市价卖出，返回 Future[Optional[dict]]。"""
-        fut: Future = Future()
-        self._executor.submit(self._do_market_sell, asset_id, amount, order_type, fut)
-        return fut
-
-    def _do_market_sell(self, asset_id: str, amount: float, order_type: OrderType, fut: Future):
-        self._rate_wait()
-        try:
-            res = self._client.create_and_post_market_order(
-                order_args=MarketOrderArgs(token_id=asset_id, amount=amount, side="SELL"),
-                options=PartialCreateOrderOptions(),
-                order_type=order_type,
-            )
-            fut.set_result(res)
-        except Exception as e:
-            logger.error("[SELL FAIL] %s... | %s", asset_id[:20], e)
-            fut.set_result(None)
+            if attempt < self._cfg.place_retries:
+                time.sleep(self._cfg.place_retry_delay)
+            else:
+                with self._lock_place:
+                    self._place_tokens.pop(token, None)
+                fut.set_result(None)
 
     # ── 限价卖单 ──────────────────────────────────────────────────────────────
     def limit_sell(self, asset_id: str, price: float, size: float, tick_size: Decimal) -> Future:

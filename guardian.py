@@ -29,11 +29,9 @@ from py_clob_client_v2 import (
     ClobClient,
     ApiCreds,
     OpenOrderParams,
-    MarketOrderArgs,
     BalanceAllowanceParams,
     AssetType,
     PartialCreateOrderOptions,
-    OrderType,
 )
 
 from config import Config
@@ -99,12 +97,13 @@ class Guardian:
         # ── 交易处理 ──────────────────────────────────────────────────────────
         self._sell_lock = threading.Lock()
         self._selling: Set[str] = set()
-        self._processed_trades: Set[str] = set()
+        self._processed_trades: Dict[str, float] = {}
         self._trade_lock = threading.Lock()
         self._pending_sells: Dict[str, dict] = {}
         self._pending_sells_lock = threading.Lock()
 
         # ── 缓存 ──────────────────────────────────────────────────────────────
+        self._cache_lock = threading.RLock()
         self._ob_cache: Dict[str, Tuple[float, float]] = {}
         self._market_info: Dict[str, dict] = {}
 
@@ -173,8 +172,9 @@ class Guardian:
             return []
 
     def market_info(self, asset_id: str) -> dict:
-        if asset_id in self._market_info:
-            return self._market_info[asset_id]
+        with self._cache_lock:
+            if asset_id in self._market_info:
+                return self._market_info[asset_id]
         info = {"title": "未知", "outcome": ""}
         try:
             r = requests.get(f"{self.cfg.host}/markets-by-token/{asset_id}", timeout=10)
@@ -184,7 +184,8 @@ class Guardian:
                 info["title"] = item.get("question", item.get("title", "未知"))
         except Exception:
             pass
-        self._market_info[asset_id] = info
+        with self._cache_lock:
+            self._market_info[asset_id] = info
         return info
 
     def best_bid(self, token_id: str) -> Optional[float]:
@@ -195,14 +196,16 @@ class Guardian:
             prices = [p for p in prices if p > 0]
             return max(prices) if prices else None
 
-        if self.cfg.cache_ttl > 0 and token_id in self._ob_cache:
-            t, v = self._ob_cache[token_id]
-            if time.time() - t < self.cfg.cache_ttl:
-                return v
+        with self._cache_lock:
+            if self.cfg.cache_ttl > 0 and token_id in self._ob_cache:
+                t, v = self._ob_cache[token_id]
+                if time.time() - t < self.cfg.cache_ttl:
+                    return v
         try:
             val = retry_call(_fetch, retries=3, delay=1.0)
             if val is not None:
-                self._ob_cache[token_id] = (time.time(), val)
+                with self._cache_lock:
+                    self._ob_cache[token_id] = (time.time(), val)
             return val
         except Exception as e:
             logger.error("best_bid 失败: %s... | %s", token_id[:20], e)
@@ -232,89 +235,6 @@ class Guardian:
         except Exception as e:
             logger.error("余额查询失败: %s", e)
             return 0.0
-
-    # ── 卖出（P1 修复：FOK 回退链 + 余额重试修复） ─────────────────────────────
-    def _sell(self, asset_id: str, size: float, buy_info: Optional[dict] = None) -> bool:
-        if size <= 0:
-            return False
-        with self._sell_lock:
-            if asset_id in self._selling:
-                return False
-            self._selling.add(asset_id)
-
-        mi = self.market_info(asset_id)
-        title = (buy_info or {}).get("title") or mi.get("title", "未知")
-        outcome = (buy_info or {}).get("outcome") or mi.get("outcome", "")
-        retryable = [
-            "not enough balance", "insufficient balance", "insufficient funds",
-            "invalid amount", "invalid size", "request exception",
-            "timeout", "timed out", "connection error", "temporarily unavailable",
-            "unavailable", "503", "502", "504", "read timeout", "connect timeout",
-        ]
-        fok_specific = ["fully filled", "fill or kill", "fok", "couldn't"]
-
-        order_types_to_try = list(self.cfg.sell_fallback_order_types)
-        ot_map = {"FOK": OrderType.FOK, "FAK": OrderType.FAK, "GTC": OrderType.GTC}
-
-        try:
-            for type_idx, ot_name in enumerate(order_types_to_try):
-                ot = ot_map.get(ot_name, OrderType.FOK)
-                for attempt in range(1, self.cfg.sell_retries + 1):
-                    try:
-                        logger.info("[SELL] %s/%d type=%s | %s | %.4f",
-                                    attempt, self.cfg.sell_retries, ot_name, title[:35], size)
-                        res = self.client.create_and_post_market_order(
-                            order_args=MarketOrderArgs(token_id=asset_id, amount=size, side="SELL"),
-                            options=PartialCreateOrderOptions(),
-                            order_type=ot,
-                        )
-                        sell_info = {
-                            "token_id": asset_id, "size": size,
-                            "price": res.get("takingAmount", ""),
-                            "title": title, "outcome": outcome,
-                        }
-                        if buy_info:
-                            trade_logger.info(json.dumps(
-                                {"buy": buy_info, "sell": sell_info}, ensure_ascii=False
-                            ))
-                        logger.info("[SELL OK] %s | %.4f", title[:35], size)
-                        return True
-                    except Exception as e:
-                        msg = str(e).lower()
-                        # FOK 特有失败 → 尝试下一个类型
-                        if any(kw in msg for kw in fok_specific) and type_idx < len(order_types_to_try) - 1:
-                            logger.warning("[SELL FALLBACK] FOK 失败，降级为 FAK/GTC")
-                            break
-                        if any(s in msg for s in retryable) and attempt < self.cfg.sell_retries:
-                            delay = min(0.5 * (2 ** (attempt - 1)), 3.0)
-                            logger.warning("[SELL RETRY] delay=%.1fs | %s", delay, e)
-                            time.sleep(delay)
-                            continue
-                        logger.error("[SELL FAIL] %s | %.4f | %s", title[:35], size, e)
-                        if buy_info:
-                            trade_logger.error(json.dumps(
-                                {"buy": buy_info, "sell": {"status": "FAILED", "error": str(e)}},
-                                ensure_ascii=False,
-                            ))
-                        return False
-            return False
-        finally:
-            with self._sell_lock:
-                self._selling.discard(asset_id)
-
-    def sell_position(self, asset_id: str, buy_info: Optional[dict] = None):
-        # P1 修复：使用配置的重试次数
-        for attempt in range(1, self.cfg.balance_retries + 1):
-            bal = self.onchain_balance(asset_id)
-            logger.info("  链上余额(attempt %d/%d): %.2f", attempt, self.cfg.balance_retries, bal)
-            if bal > self.cfg.position_threshold:
-                self._sell(asset_id, bal, buy_info)
-                return
-            if bal > 0:
-                break
-            if attempt < self.cfg.balance_retries:
-                time.sleep(self.cfg.balance_delay)
-        logger.warning("余额不足: %s... 余额=%.2f", asset_id[:20], bal)
 
     # ── 订单发现 ──────────────────────────────────────────────────────────────
     def discover(self):
@@ -440,10 +360,6 @@ class Guardian:
         logger.info("[AUDIT] 完成 | 纠偏 %d 个", len(to_cancel))
 
     # ── 交易处理 ──────────────────────────────────────────────────────────────
-    def mark_trade_processed(self, tid: str):
-        with self._trade_lock:
-            self._processed_trades.add(tid)
-
     def handle_trade(self, data: dict):
         tid = data.get("id", "")
         status = str(data.get("status", "")).upper()
@@ -458,7 +374,33 @@ class Guardian:
 
         logger.info("[TRADE] id=%s status=%s side=%s", tid[:16], status, side)
 
-        if not asset_id or side != "BUY":
+        if not asset_id:
+            return
+
+        # 卖单成交：仅记录日志，不触发动作
+        if side == "SELL":
+            if status == "CONFIRMED":
+                with self._trade_lock:
+                    self._processed_trades[tid] = time.time()
+                maker_orders = data.get("maker_orders") or []
+                our_fill = sum(
+                    safe_float(m.get("matched_amount", 0))
+                    for m in maker_orders
+                    if (m.get("owner") or m.get("order_owner", "")) == self.cfg.api_key
+                )
+                mi = self.market_info(asset_id)
+                trade_logger.info(json.dumps({
+                    "sell_confirmed": {
+                        "trade_id": tid, "token_id": asset_id, "side": "SELL",
+                        "size": our_fill, "price": price,
+                        "title": mi.get("title", "未知"), "outcome": outcome,
+                    }
+                }, ensure_ascii=False))
+                logger.info("[SELL CONFIRMED] %s | %s | size=%.4f price=%s",
+                            mi.get("title", "未知")[:40], outcome, our_fill, price)
+            return
+
+        if side != "BUY":
             return
 
         maker_orders = data.get("maker_orders") or []
@@ -490,6 +432,9 @@ class Guardian:
 
     def _on_trade_matched(self, tid: str, asset_id: str, fill_size: float, price: float, outcome: str, maker_orders: list):
         with self._pending_sells_lock:
+            if tid in self._pending_sells:
+                logger.debug("[TRADE] MATCHED %s 已处理，跳过", tid[:16])
+                return
             self._pending_sells[tid] = {
                 "asset_id": asset_id, "fill_size": fill_size, "price": price,
                 "outcome": outcome, "time": time.time(),
@@ -509,7 +454,7 @@ class Guardian:
             pending = self._pending_sells.pop(tid, None)
 
         with self._trade_lock:
-            self._processed_trades.add(tid)
+            self._processed_trades[tid] = time.time()
 
         if pending is None:
             logger.warning("[CONFIRMED] %s 无匹配 pending，使用事件数据", tid[:16])
@@ -517,17 +462,13 @@ class Guardian:
         else:
             actual = (pending["fill_size"], pending["price"], pending["outcome"])
 
-        threading.Thread(
-            target=self._process_trade_sell,
-            args=(tid, asset_id, *actual),
-            daemon=True,
-        ).start()
+        self.exec_layer.submit(self._process_trade_sell, tid, asset_id, *actual)
 
     def _on_trade_failed(self, tid: str):
         with self._pending_sells_lock:
             self._pending_sells.pop(tid, None)
         with self._trade_lock:
-            self._processed_trades.add(tid)
+            self._processed_trades[tid] = time.time()
         logger.warning("[TRADE FAILED] %s 已清理", tid[:16])
 
     def _process_trade_sell(self, trade_id: str, asset_id: str, fill_size: float, price: float, outcome: str):
@@ -544,7 +485,7 @@ class Guardian:
         logger.info("[LIMIT SELL] %s 挂限价卖单 price=%s size=%.4f", asset_id[:20], sell_price, fill_size)
         fut = self.exec_layer.limit_sell(asset_id, sell_price, fill_size, self.cfg.tick_size)
         try:
-            sell_oid = fut.result(timeout=self.cfg.cancel_timeout)
+            sell_oid = fut.result(timeout=self.cfg.place_timeout)
         except Exception:
             sell_oid = None
 
@@ -590,39 +531,17 @@ class Guardian:
                         actor.post(ActorEvent(EventType.EXTERNAL_CANCEL, {"order_id": oid}))
                 return
 
-            logger.info("[MANUAL CANCEL] 人工撤单 %s asset=%s", oid[:20], asset_id[:20])
+            # 非系统撤单：统一走 Actor 通知 → 冷却重挂，避免将交易所自动取消误判为人工撤单
+            # 真正需要放弃的市场由 discover() 多周期逻辑处理
+            logger.info("[EXT CANCEL] 外部撤单 %s asset=%s", oid[:20], asset_id[:20])
             cancel_logger.info(json.dumps({
                 "order_id": oid, "asset_id": asset_id, "side": side,
-                "source": "manual", "reason": "人工撤单-将放弃市场",
+                "source": "external", "reason": "外部撤单-冷却重挂",
             }, ensure_ascii=False))
-            if side != "BUY" or not asset_id:
-                return
-            threading.Thread(target=self._check_abandon, args=(oid, asset_id), daemon=True).start()
-
-    def _check_abandon(self, oid: str, asset_id: str):
-        """处理非系统发起的撤单事件（人工撤单）。
-
-        人工撤单 = 用户主动放弃该市场，不再守护。
-        与交易所自动取消（心跳超时）的区别：
-        - 人工撤单：单个订单被取消 → 放弃该市场
-        - 系统撤单：best_bid 变化等 → 冷却后重挂（由 _cancel 流程处理）
-        """
-        time.sleep(self.cfg.cooldown_delay)
-        if not self.running:
-            return
-        try:
-            actor = self.remove_actor(asset_id)
-            self._abandon_pending.pop(asset_id, None)
-            if actor:
-                logger.info("[MANUAL CANCEL] 放弃市场 %s", asset_id[:20])
-                mi = self.market_info(asset_id)
-                msg = f"asset_id={asset_id} | order_id={oid} | title={mi.get('title','未知')[:50]} | reason=人工撤单"
-                abandon_logger.info(msg)
-                actor.stop(cancel_active=False)
-            else:
-                logger.info("[MANUAL CANCEL] Actor 不存在，忽略 %s", asset_id[:20])
-        except Exception as e:
-            logger.error("[ABANDON CHECK] 失败: %s", e)
+            if asset_id and side == "BUY":
+                actor = self.get_actor(asset_id)
+                if actor:
+                    actor.post(ActorEvent(EventType.EXTERNAL_CANCEL, {"order_id": oid}))
 
     # ── 持仓兜底 ──────────────────────────────────────────────────────────────
     def check_positions(self):
@@ -637,7 +556,7 @@ class Guardian:
             with self._pending_sells_lock:
                 self._pending_sells.pop(tid, None)
             with self._trade_lock:
-                self._processed_trades.add(tid)
+                self._processed_trades[tid] = time.time()
             logger.warning("[PENDING CLEANUP] 过期 trade %s 未收到 CONFIRMED", tid[:16])
 
         pos_list = self.positions()
@@ -679,7 +598,7 @@ class Guardian:
 
                 fut = self.exec_layer.limit_sell(tid, sell_price, bal, self.cfg.tick_size)
                 try:
-                    sell_oid = fut.result(timeout=self.cfg.cancel_timeout)
+                    sell_oid = fut.result(timeout=self.cfg.place_timeout)
                 except Exception:
                     sell_oid = None
 
@@ -714,24 +633,26 @@ class Guardian:
         now = time.time()
         max_age = max(self.cfg.cache_ttl * 2, 60.0)
 
-        stale = [k for k, (t, _) in self._ob_cache.items() if now - t > max_age]
-        for k in stale:
-            self._ob_cache.pop(k, None)
-        if stale:
-            logger.debug("[CACHE] 清理 _ob_cache %d 条", len(stale))
+        with self._cache_lock:
+            stale = [k for k, (t, _) in self._ob_cache.items() if now - t > max_age]
+            for k in stale:
+                self._ob_cache.pop(k, None)
+            if stale:
+                logger.debug("[CACHE] 清理 _ob_cache %d 条", len(stale))
 
-        if len(self._market_info) > self.cfg.cache_max_size:
-            keys = list(self._market_info.keys())
-            for k in keys[:len(keys) - self.cfg.cache_max_size // 2]:
-                self._market_info.pop(k, None)
-            logger.debug("[CACHE] 清理 _market_info")
+            if len(self._market_info) > self.cfg.cache_max_size:
+                keys = list(self._market_info.keys())
+                for k in keys[:len(keys) - self.cfg.cache_max_size // 2]:
+                    self._market_info.pop(k, None)
+                logger.debug("[CACHE] 清理 _market_info")
 
         with self._trade_lock:
             if len(self._processed_trades) > self.cfg.trade_max_size:
-                oldest = list(self._processed_trades)[:self.cfg.trade_max_size // 2]
-                for o in oldest:
-                    self._processed_trades.discard(o)
-                logger.debug("[CACHE] 清理 _processed_trades %d 条", len(oldest))
+                sorted_items = sorted(self._processed_trades.items(), key=lambda x: x[1])
+                to_remove = [tid for tid, _ in sorted_items[:self.cfg.trade_max_size // 2]]
+                for tid in to_remove:
+                    self._processed_trades.pop(tid, None)
+                logger.debug("[CACHE] 清理 _processed_trades %d 条", len(to_remove))
 
     # ── 主循环 ────────────────────────────────────────────────────────────────
     def run(self):

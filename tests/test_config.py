@@ -21,16 +21,15 @@ class TestConfigDefaults:
         assert cfg.maker_rank == 3
         assert cfg.maker_cooldown == 120.0  # V7 默认 120s（V6 是 360s）
 
+    def test_maker_rank_consistent_with_strategy(self):
+        """Bug #12: maker_rank 默认值与文档/策略一致（第 3 档）"""
+        cfg = Config()
+        assert cfg.maker_rank == 3
+
     def test_default_heartbeat(self):
         cfg = Config()
         assert cfg.heartbeat_interval == 7.0
         assert cfg.heartbeat_max_errors == 3
-
-    def test_default_sell_fallback(self):
-        cfg = Config()
-        assert len(cfg.sell_fallback_order_types) == 2
-        assert "FOK" in cfg.sell_fallback_order_types
-        assert "FAK" in cfg.sell_fallback_order_types
 
     def test_tick_size_is_decimal(self):
         cfg = Config()
@@ -41,10 +40,6 @@ class TestConfigDefaults:
         cfg = Config()
         assert cfg.cache_max_size == 500
         assert cfg.trade_max_size == 50000
-
-    def test_balance_retries(self):
-        cfg = Config()
-        assert cfg.balance_retries == 3
 
 
 class TestConfigSignatureType:

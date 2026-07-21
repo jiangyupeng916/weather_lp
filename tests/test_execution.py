@@ -101,6 +101,24 @@ class TestExecutionLayerCancel:
         # 非系统撤单
         assert layer.is_system_cancel("unknown_id") is False
 
+    def test_cancel_failure_preserves_system_marker(self):
+        """Bug #2: 撤单失败时保留 _system_cancels，避免 WS 事件误判为人工撤单"""
+        client = MagicMock()
+        client.cancel_order.side_effect = ConnectionError("timeout")
+
+        cfg = _make_cfg()
+        layer = ExecutionLayer(client, cfg)
+
+        fut = layer.cancel("0xfail_cancel", "测试")
+        result = fut.result(timeout=5)
+
+        assert result is False
+        # _cancel_tokens 应被清除（允许重试）
+        assert "0xfail_cancel" not in layer._cancel_tokens
+        # _system_cancels 应保留（WS CANCELLATION 仍能识别为系统撤单）
+        assert "0xfail_cancel" in layer._system_cancels
+        assert layer.is_system_cancel("0xfail_cancel") is True
+
 
 class TestExecutionLayerPlace:
     def test_place_success(self):
@@ -161,6 +179,36 @@ class TestExecutionLayerPlace:
 
         assert oid is None
         assert client.create_and_post_order.call_count == cfg.place_retries
+
+    def test_place_empty_order_id_clears_token(self):
+        """Bug #1: API 返回成功但 order_id 为空时，token 应被清除以允许重挂"""
+        client = MagicMock()
+        client.create_and_post_order.return_value = {"unrelated_field": "value"}
+
+        cfg = _make_cfg(place_retries=1)
+        layer = ExecutionLayer(client, cfg)
+
+        fut = layer.place("asset_1", Decimal("0.50"), Decimal("10"), Decimal("0.01"))
+        oid = fut.result(timeout=5)
+
+        assert oid is None
+        # token 应被清除，下次同 asset+price 可重新下单
+        token = "place:asset_1:" + str(Decimal("0.50"))
+        assert token not in layer._place_tokens
+
+    def test_place_empty_order_id_retries(self):
+        """Bug #1: order_id 为空时应触发重试"""
+        client = MagicMock()
+        client.create_and_post_order.return_value = {}
+
+        cfg = _make_cfg(place_retries=3, place_retry_delay=0.01)
+        layer = ExecutionLayer(client, cfg)
+
+        fut = layer.place("asset_1", Decimal("0.50"), Decimal("10"), Decimal("0.01"))
+        oid = fut.result(timeout=5)
+
+        assert oid is None
+        assert client.create_and_post_order.call_count == 3
 
 
 class TestExecutionLayerRateLimit:
