@@ -177,31 +177,6 @@ class TestActorPlaceCancel:
             actor.force_stop()
 
 
-class TestActorPartialFill:
-    def test_trade_matched_stays_resting(self):
-        """P1 修复：部分成交不放弃订单，保持 RESTING"""
-        cfg = _make_cfg()
-        guardian = _make_mock_guardian(cfg)
-
-        order = OrderInfo(
-            order_id="0xexisting_123",
-            price=0.50, size=10.0, side="BUY", token_id="asset_1",
-        )
-        actor = AssetActor("asset_1", guardian, initial=order)
-        try:
-            assert actor.state == ActorState.RESTING
-
-            # 收到成交事件
-            actor.post(ActorEvent(EventType.TRADE_MATCHED, {"matched_order_id": "0xexisting_123"}))
-            time.sleep(0.2)
-
-            # 保持 RESTING，不清除 active_id
-            assert actor.state == ActorState.RESTING, f"实际状态: {actor.state.name}"
-            assert actor.active_id == "0xexisting_123", "部分成交不应清除 active_id"
-        finally:
-            actor.force_stop()
-
-
 class TestActorTickSize:
     def test_target_price_aligned(self):
         """target_price 应对齐到 tick_size"""

@@ -96,22 +96,22 @@ class TestGuardianActorManagement:
 
 
 class TestGuardianTradeHandling:
-    def test_handle_trade_not_buy_side_ignored(self):
+    def test_non_confirmed_trade_ignored(self):
+        """非 CONFIRMED 状态（MATCHED/FAILED/RETRYING）仅打日志，不进入 _processed_trades"""
         cfg = _make_cfg()
         with patch('guardian.ClobClient'), \
              patch('guardian.Account.from_key', return_value=MagicMock(address="0xTest")):
             g = Guardian(cfg)
-            # SELL 方向的成交应被忽略
             g.handle_trade({
-                "id": "t_sell",
+                "id": "t_match",
                 "status": "MATCHED",
                 "asset_id": "asset_1",
-                "side": "SELL",
+                "side": "BUY",
                 "price": "0.50",
                 "maker_orders": [{"owner": "test-key", "matched_amount": "5"}],
             })
-            # 不应该进入 pending_sells
-            assert "t_sell" not in g._pending_sells
+            # MATCHED 不触发任何动作，不进入 _processed_trades
+            assert "t_match" not in g._processed_trades
 
     def test_handle_trade_duplicate_ignored(self):
         cfg = _make_cfg()
@@ -121,18 +121,19 @@ class TestGuardianTradeHandling:
             with g._trade_lock:
                 g._processed_trades["trade_dup"] = time.time()
             # 已处理过的 trade 应被忽略
-            g.handle_trade({
-                "id": "trade_dup",
-                "status": "MATCHED",
-                "asset_id": "asset_1",
-                "side": "BUY",
-                "price": "0.50",
-                "maker_orders": [{"owner": "test-key", "matched_amount": "5"}],
-            })
-            assert "trade_dup" not in g._pending_sells
+            with patch('guardian.trade_logger') as mock_tl:
+                g.handle_trade({
+                    "id": "trade_dup",
+                    "status": "CONFIRMED",
+                    "asset_id": "asset_1",
+                    "side": "BUY",
+                    "price": "0.50",
+                    "maker_orders": [{"owner": "test-key", "matched_amount": "5"}],
+                })
+                mock_tl.info.assert_not_called()
 
     def test_handle_trade_sell_confirmed_logged(self):
-        """Bug #4: 卖单 CONFIRMED 应记录到 trade_logger，不触发卖出动作"""
+        """卖单 CONFIRMED 应记录到 trade_logger"""
         cfg = _make_cfg()
         with patch('guardian.ClobClient'), \
              patch('guardian.Account.from_key', return_value=MagicMock(address="0xTest")):
@@ -150,45 +151,39 @@ class TestGuardianTradeHandling:
                     "maker_orders": [{"owner": "test-key", "matched_amount": "10"}],
                 })
 
-                # 应记录到 trade_logger
                 assert mock_tl.info.call_count == 1
                 logged = json.loads(mock_tl.info.call_args[0][0])
                 assert logged["sell_confirmed"]["token_id"] == "asset_1"
                 assert logged["sell_confirmed"]["size"] == 10.0
                 assert logged["sell_confirmed"]["price"] == 0.55
 
-            # 不应进入 _pending_sells（买单才进）
-            assert "t_sell_ok" not in g._pending_sells
-            # 应标记为已处理
+            # CONFIRMED 应标记为已处理
             assert "t_sell_ok" in g._processed_trades
 
-    def test_handle_trade_matched_dedup(self):
-        """Bug #5: MATCHED 事件重放时不应重复处理"""
+    def test_handle_trade_buy_confirmed_logged(self):
+        """买单 CONFIRMED 应记录到 trade_logger"""
         cfg = _make_cfg()
         with patch('guardian.ClobClient'), \
              patch('guardian.Account.from_key', return_value=MagicMock(address="0xTest")):
             g = Guardian(cfg)
-            mock_actor = MagicMock()
-            g.add_actor("asset_1", mock_actor)
+            g.market_info = MagicMock(return_value={"title": "TestMarket", "outcome": "Yes"})
 
-            trade_data = {
-                "id": "t_match",
-                "status": "MATCHED",
-                "asset_id": "asset_1",
-                "side": "BUY",
-                "price": "0.50",
-                "maker_orders": [{"owner": "test-key", "matched_amount": "5", "order_id": "o1"}],
-            }
+            with patch('guardian.trade_logger') as mock_tl:
+                g.handle_trade({
+                    "id": "t_buy_ok",
+                    "status": "CONFIRMED",
+                    "asset_id": "asset_1",
+                    "side": "BUY",
+                    "price": "0.45",
+                    "outcome": "Yes",
+                    "maker_orders": [{"owner": "test-key", "matched_amount": "20"}],
+                })
 
-            # 第一次处理
-            g.handle_trade(trade_data)
-            assert "t_match" in g._pending_sells
-            assert mock_actor.post.call_count == 1
-
-            # WS 重连后重放第二次 → 应跳过
-            g.handle_trade(trade_data)
-            # post 不应再次被调用
-            assert mock_actor.post.call_count == 1
+                assert mock_tl.info.call_count == 1
+                logged = json.loads(mock_tl.info.call_args[0][0])
+                assert logged["buy_confirmed"]["token_id"] == "asset_1"
+                assert logged["buy_confirmed"]["size"] == 20.0
+                assert logged["buy_confirmed"]["price"] == 0.45
 
 
 class TestGuardianCachePrune:

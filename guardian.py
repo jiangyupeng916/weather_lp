@@ -99,8 +99,6 @@ class Guardian:
         self._selling: Set[str] = set()
         self._processed_trades: Dict[str, float] = {}
         self._trade_lock = threading.Lock()
-        self._pending_sells: Dict[str, dict] = {}
-        self._pending_sells_lock = threading.Lock()
 
         # ── 缓存 ──────────────────────────────────────────────────────────────
         self._cache_lock = threading.RLock()
@@ -361,6 +359,7 @@ class Guardian:
 
     # ── 交易处理 ──────────────────────────────────────────────────────────────
     def handle_trade(self, data: dict):
+        """记录 CONFIRMED trade 事件到 trade_logger，不触发卖出（卖出由 check_positions 负责）。"""
         tid = data.get("id", "")
         status = str(data.get("status", "")).upper()
         asset_id = data.get("asset_id") or data.get("token_id", "")
@@ -374,34 +373,11 @@ class Guardian:
 
         logger.info("[TRADE] id=%s status=%s side=%s", tid[:16], status, side)
 
-        if not asset_id:
+        if not asset_id or status != "CONFIRMED":
             return
 
-        # 卖单成交：仅记录日志，不触发动作
-        if side == "SELL":
-            if status == "CONFIRMED":
-                with self._trade_lock:
-                    self._processed_trades[tid] = time.time()
-                maker_orders = data.get("maker_orders") or []
-                our_fill = sum(
-                    safe_float(m.get("matched_amount", 0))
-                    for m in maker_orders
-                    if (m.get("owner") or m.get("order_owner", "")) == self.cfg.api_key
-                )
-                mi = self.market_info(asset_id)
-                trade_logger.info(json.dumps({
-                    "sell_confirmed": {
-                        "trade_id": tid, "token_id": asset_id, "side": "SELL",
-                        "size": our_fill, "price": price,
-                        "title": mi.get("title", "未知"), "outcome": outcome,
-                    }
-                }, ensure_ascii=False))
-                logger.info("[SELL CONFIRMED] %s | %s | size=%.4f price=%s",
-                            mi.get("title", "未知")[:40], outcome, our_fill, price)
-            return
-
-        if side != "BUY":
-            return
+        with self._trade_lock:
+            self._processed_trades[tid] = time.time()
 
         maker_orders = data.get("maker_orders") or []
         our_fill = sum(
@@ -410,106 +386,27 @@ class Guardian:
             if (m.get("owner") or m.get("order_owner", "")) == self.cfg.api_key
         )
 
-        # CONFIRMED 事件可能不包含 maker_orders → 从 _pending_sells 恢复
-        if status == "CONFIRMED" and our_fill <= 0:
-            with self._pending_sells_lock:
-                pending = self._pending_sells.get(tid)
-            if pending:
-                our_fill = pending["fill_size"]
-                price = pending["price"]
-                outcome = pending["outcome"]
-                logger.info("[TRADE] CONFIRMED 从缓存恢复 our_fill=%.4f", our_fill)
-
-        if our_fill <= 0:
-            return
-
-        if status == "MATCHED":
-            self._on_trade_matched(tid, asset_id, our_fill, price, outcome, maker_orders)
-        elif status == "CONFIRMED":
-            self._on_trade_confirmed(tid, asset_id, our_fill, price, outcome)
-        elif status in ("FAILED", "RETRYING"):
-            self._on_trade_failed(tid)
-
-    def _on_trade_matched(self, tid: str, asset_id: str, fill_size: float, price: float, outcome: str, maker_orders: list):
-        with self._pending_sells_lock:
-            if tid in self._pending_sells:
-                logger.debug("[TRADE] MATCHED %s 已处理，跳过", tid[:16])
-                return
-            self._pending_sells[tid] = {
-                "asset_id": asset_id, "fill_size": fill_size, "price": price,
-                "outcome": outcome, "time": time.time(),
-            }
-
-        actor = self.get_actor(asset_id)
-        if actor:
-            matched_oid = ""
-            for m in maker_orders:
-                if (m.get("owner") or m.get("order_owner", "")) == self.cfg.api_key:
-                    matched_oid = m.get("order_id", "")
-                    break
-            actor.post(ActorEvent(EventType.TRADE_MATCHED, {"matched_order_id": matched_oid}))
-
-    def _on_trade_confirmed(self, tid: str, asset_id: str, fill_size: float, price: float, outcome: str):
-        with self._pending_sells_lock:
-            pending = self._pending_sells.pop(tid, None)
-
-        with self._trade_lock:
-            self._processed_trades[tid] = time.time()
-
-        if pending is None:
-            logger.warning("[CONFIRMED] %s 无匹配 pending，使用事件数据", tid[:16])
-            actual = (fill_size, price, outcome)
-        else:
-            actual = (pending["fill_size"], pending["price"], pending["outcome"])
-
-        self.exec_layer.submit(self._process_trade_sell, tid, asset_id, *actual)
-
-    def _on_trade_failed(self, tid: str):
-        with self._pending_sells_lock:
-            self._pending_sells.pop(tid, None)
-        with self._trade_lock:
-            self._processed_trades[tid] = time.time()
-        logger.warning("[TRADE FAILED] %s 已清理", tid[:16])
-
-    def _process_trade_sell(self, trade_id: str, asset_id: str, fill_size: float, price: float, outcome: str):
         mi = self.market_info(asset_id)
-        title = mi.get("title", "未知")
-        logger.info("[CONFIRMED BUY] %s | %s | 成交:%.4f | price=%s", title[:40], outcome, fill_size, price)
-        if fill_size <= 0:
-            return
-
-        # CONFIRMED = 链上已最终结算，余额已到账，直接下限价卖单
-        sell_price = safe_float_from_decimal(
-            round_to_tick(Decimal(str(price)), self.cfg.tick_size)
-        )
-        logger.info("[LIMIT SELL] %s 挂限价卖单 price=%s size=%.4f", asset_id[:20], sell_price, fill_size)
-        fut = self.exec_layer.limit_sell(asset_id, sell_price, fill_size, self.cfg.tick_size)
-        try:
-            sell_oid = fut.result(timeout=self.cfg.place_timeout)
-        except Exception:
-            sell_oid = None
-
-        if sell_oid:
+        if side == "BUY":
             trade_logger.info(json.dumps({
-                "buy": {
-                    "trade_id": trade_id, "token_id": asset_id, "side": "BUY",
-                    "size": fill_size, "price": price, "title": title, "outcome": outcome,
-                },
-                "sell": {
-                    "order_id": sell_oid, "token_id": asset_id, "side": "SELL",
-                    "size": fill_size, "price": sell_price,
-                },
+                "buy_confirmed": {
+                    "trade_id": tid, "token_id": asset_id, "side": "BUY",
+                    "size": our_fill, "price": price,
+                    "title": mi.get("title", "未知"), "outcome": outcome,
+                }
             }, ensure_ascii=False))
-            logger.info("[LIMIT SELL OK] %s id=%s", asset_id[:20], str(sell_oid)[:20])
+            logger.info("[BUY CONFIRMED] %s | %s | size=%.4f price=%s",
+                        mi.get("title", "未知")[:40], outcome, our_fill, price)
         else:
-            trade_logger.error(json.dumps({
-                "buy": {
-                    "trade_id": trade_id, "token_id": asset_id, "side": "BUY",
-                    "size": fill_size, "price": price, "title": title, "outcome": outcome,
-                },
-                "sell": {"status": "FAILED", "error": "limit_sell 返回 None"},
+            trade_logger.info(json.dumps({
+                "sell_confirmed": {
+                    "trade_id": tid, "token_id": asset_id, "side": "SELL",
+                    "size": our_fill, "price": price,
+                    "title": mi.get("title", "未知"), "outcome": outcome,
+                }
             }, ensure_ascii=False))
-            logger.error("[LIMIT SELL FAIL] %s 限价卖单下单失败", asset_id[:20])
+            logger.info("[SELL CONFIRMED] %s | %s | size=%.4f price=%s",
+                        mi.get("title", "未知")[:40], outcome, our_fill, price)
 
     # ── 订单事件 ──────────────────────────────────────────────────────────────
     def handle_order(self, data: dict):
@@ -545,20 +442,6 @@ class Guardian:
 
     # ── 持仓兜底 ──────────────────────────────────────────────────────────────
     def check_positions(self):
-        stale_timeout = 1800
-        now = time.time()
-        with self._pending_sells_lock:
-            stale = [
-                tid for tid, p in self._pending_sells.items()
-                if now - p.get("time", 0) > stale_timeout
-            ]
-        for tid in stale:
-            with self._pending_sells_lock:
-                self._pending_sells.pop(tid, None)
-            with self._trade_lock:
-                self._processed_trades[tid] = time.time()
-            logger.warning("[PENDING CLEANUP] 过期 trade %s 未收到 CONFIRMED", tid[:16])
-
         pos_list = self.positions()
         if not pos_list:
             return

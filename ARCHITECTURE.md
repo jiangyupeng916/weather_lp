@@ -4,15 +4,17 @@
 
 Guardian V7 是一个 **Polymarket CLOB 交易平台的 Maker-only 自动化做市机器人**。
 
-**核心策略**：监控订单簿买盘，在第 N 档（默认第 3 档）挂限价买单。best_bid（第 1 档）变化时撤单，冷却 120s 后重挂。买入成交后等待链上结算确认（CONFIRMED），然后挂同价同量限价卖单（GTC）。
+**核心目的**：挂单提供流动性以获取平台返利奖励。机器人在订单簿买盘第 N 档挂限价买单，best_bid 变化时撤单重挂。买入成交后，由 `check_positions()` 定时扫描持仓并补挂同价限价卖单平仓。
 
 **关键行为规则**：
 
 - **系统撤单**（best_bid 变化 / target_price 变化 / WSS 重连）：Actor 冷却 120s → 重新挂单
-- **人工撤单**（用户在 Polymarket GUI 手动取消订单）：**放弃该市场，不再守护**
-- **交易所自动取消**（心跳超时等）：由 `discover()` 多周期检测清理；正常情况下心跳保活机制防止发生
+- **外部撤单**（用户手动 / 交易所自动取消）：统一走 Actor 通知 → 冷却重挂；真正需要放弃的市场由 `discover()` 多周期检测清理
+- **卖出**：不依赖 WS 事件驱动，由 `check_positions()` 每 120s 定时扫描持仓 → 补挂限价卖单
 
 **技术栈**：Python 3.12+ | `py_clob_client_v2` | `websocket-client` | `eth_account` | `requests`
+
+**策略文档**：详细逻辑见 [LOGIC.md](./LOGIC.md)。
 
 ***
 
@@ -80,35 +82,36 @@ utils.py    ← 无内部依赖（纯函数工具）
 
 ## 三、核心组件详解
 
-### 3.0 卖出策略 — 限价卖单（非市价抛售）
+### 3.0 卖出策略 — 定时扫描持仓（不依赖 WS 事件）
 
-**买入成交后不再市价卖出**，而是等待链上结算确认后挂同价同量限价卖单。
+**卖出唯一路径**：`check_positions()` 每 120s 定时扫描，不依赖 WS trade 事件触发。
 
 数据流：
 
 ```
-User WS trade 事件
+check_positions() 每 120s 执行：
     │
-    ├─ status=MATCHED
-    │   └─ 存入 _pending_sells（记录 fill_size/price/outcome）
-    │   └─ 通知 Actor（保持 RESTING，不清除订单）
+    ├─ 1. 查询 Data API 持仓列表
     │
-    ├─ status=CONFIRMED（链上已结算，余额已到账）
-    │   └─ _on_trade_confirmed() → _process_trade_sell()
-    │       └─ exec_layer.limit_sell(asset_id, price=buy_price, size=fill_size, GTC)
+    ├─ 2. 查询 open_orders() 找出已有卖单的 token_id
+    │
+    ├─ 3. 对每个持仓：
+    │     ├─ 已有卖单 → 跳过
+    │     ├─ 正在卖出中 → 跳过（并发保护）
+    │     └─ 无卖单 → onchain_balance() → limit_sell(avgPrice, balance)
     │           ├─ 成功 → trade_logger 记录 buy/sell 配对
-    │           └─ 失败 → trade_logger 记录 FAILED
+    │           └─ 失败 → 记录错误日志，下轮重试
     │
-    └─ status=FAILED / RETRYING
-        └─ 清理 _pending_sells，不卖出
+    └─ 4. 并发保护：_selling set + _sell_lock
 ```
 
 **关键设计**：
-- `CONFIRMED` 是 WS 推送的终端状态，表示链上已达成最终性，余额确定到账，无需轮询
-- `limit_sell` 价格对齐到 `tick_size` 后再下单，避免浮点精度误差被 API 拒绝
-- CONFIRMED 事件可能不包含 `maker_orders` → 代码优先从 `_pending_sells` 缓存中恢复 `our_fill`
+- 简单可靠：不依赖 WS CONFIRMED → 立即卖出的复杂链路
+- 天然去重：查询已有卖单后再决定是否补挂
+- 自愈能力：重启/事件丢失后最多 120s 自动补挂
+- 数据安全：查询 open_orders 过滤已有卖单，查询 onchain_balance 确认余额后才下单
 
-**兜底**：`check_positions()` 每 120s 扫描 Data API 持仓 + `open_orders()`，若某持仓无对应卖单，则补挂同价同量限价卖单（见 3.5）。
+`handle_trade()` 仅记录 CONFIRMED 事件到 trade_logger 用于审计，不触发任何卖出动作。
 
 ### 3.1 config.py — 配置模块
 
@@ -124,18 +127,21 @@ User WS trade 事件
 | | `tick_size` | 0.01 | 价格最小变动单位 |
 | 执行 | `exec_interval` | 0.2s | REST 写操作限流间隔 |
 | | `place_retries` | 2 | 下单重试次数 |
+| | `place_retry_delay` | 1.0s | 下单重试等待 |
+| | `max_workers` | 10 | 线程池最大工作线程 |
+| 超时 | `cancel_timeout` | 10.0s | 撤单 Future 等待超时 |
+| | `place_timeout` | 15.0s | 下单/卖单 Future 等待超时 |
 | 心跳 | `heartbeat_interval` | 7.0s | 小于 10s 安全阈值 |
 | | `heartbeat_max_errors` | 3 | 连续失败告警阈值 |
 | 定时 | `discover_interval` | 30s | 发现新订单间隔 |
 | | `audit_interval` | 120s | 纠偏检查间隔 |
-| | `position_interval` | 120s | 持仓兜底检查间隔 |
+| | `position_interval` | 120s | 持仓扫描卖出间隔 |
 | | `cache_prune_interval` | 300s | 缓存清理间隔 |
 | | `stale_timeout` | 60s | PLACING/CANCELING/NO_ORDER 卡死超时 |
 | WS | `ws_reconnect_delay` | 5.0s | 断线重连等待 |
 | | `user_ping_interval` | 50.0s | 用户频道 PING 保活 |
 | | `market_ping_interval` | 10.0s | 市场频道 PING 保活 |
 | 卖出 | `position_threshold` | 1.0 | 最小卖出余额阈值 |
-| | `cancel_timeout` | 10.0s | Future 等待超时 |
 
 ### 3.2 models.py — 数据模型
 
@@ -300,8 +306,8 @@ User WS trade 事件
 |------|------|------|
 | `discover()` | 30s | 发现新订单创建 Actor、多周期检测清理废弃 Actor |
 | `audit()` | 120s | 纠偏超价订单（price ≥ best_bid 即撤单）、检测订单丢失、状态卡死重置 |
-| `check_positions()` | 120s | 兜底扫描：查持仓 + 查已有卖单 → 补挂限价卖单 |
-| `_prune_caches()` | 300s | 清理过期 `_ob_cache`、`_market_info`、`_processed_trades` |
+| `check_positions()` | 120s | **唯一卖出路径**：查持仓 → 已有卖单跳过 → 无卖单补挂限价卖单 |
+| `_prune_caches()` | 300s | 清理过期 `_ob_cache`、`_market_info`、`_processed_trades`（按时间戳有序淘汰） |
 
 **discover() 多周期放弃逻辑**：
 
@@ -313,30 +319,29 @@ User WS trade 事件
   → COOLING 状态不计数（有定时器等待重挂）
 ```
 
-- 人工撤单 → `_check_abandon()` 直接放弃（不等多周期）
+- 不再有 `_check_abandon()` 立即放弃路径，所有非系统撤单统一走 Actor 冷却重挂
 - `audit()` 在全局无买单时额外清理 NO_ORDER 状态的 Actor
 
-**handle_trade() — 买入成交处理**：
+**handle_trade() — 仅记录日志**：
 
 ```
-MATCHED   → 存入 _pending_sells，通知 Actor
-CONFIRMED → 从 _pending_sells 恢复数据（如 maker_orders 缺失）
-          → 异步线程 _process_trade_sell()
-          → limit_sell(同价同量)
-FAILED    → 清理 _pending_sells
+任何 trade 事件 → 仅处理 status == "CONFIRMED"
+  ├─ BUY CONFIRMED  → trade_logger 记录 buy_confirmed
+  └─ SELL CONFIRMED → trade_logger 记录 sell_confirmed
 ```
 
-- `_processed_trades` 去重 + `_pending_sells` 缓存解决 CONFIRMED 事件不含 maker_orders 的问题
-- 初始 dump（`channel: "user"`）的 trade 也走完整 `handle_trade()` 链路
+- 不触发卖出动作，不存储中间状态
+- `_processed_trades` 字典（tid → timestamp）按时间戳有序去重，`_prune_caches` 淘汰最旧条目
 
 **handle_order() — 订单事件处理**：
 
 ```
 系统撤单 → cancel_logger 记录 → Actor EXTERNAL_CANCEL → COOLING → 重挂
-人工撤单 → cancel_logger 记录 → _check_abandon() → remove_actor() + abandon_logger
+外部撤单 → cancel_logger 记录 → Actor EXTERNAL_CANCEL → COOLING → 重挂
+          （统一处理，不区分人工/交易所，不再放弃市场）
 ```
 
-**check_positions() — 持仓兜底**：
+**check_positions() — 唯一卖出路径**：
 
 ```
 获取持仓 → 查询 open_orders() → 找到已有的 SELL 订单
@@ -344,9 +349,8 @@ FAILED    → 清理 _pending_sells
   └─ 无卖单 → onchain_balance() → limit_sell(avgPrice, balance)
 ```
 
-- 用作 WS 事件丢失（如重启时未收到 CONFIRMED）的安全网
-- 不再走市价卖出，改为补挂同成本限价卖单
 - 并发保护：`_selling` set + `_sell_lock`
+- 自愈：重启/WS 断线后最多 120s 自动补挂卖单
 
 **主循环启动顺序**：
 1. heartbeat.start() — 心跳最先启动
@@ -372,7 +376,6 @@ FAILED    → 清理 _pending_sells
 | Actor-* | N | 持久 | 每市场一个事件循环 |
 | exec-N | ≤10 | 持久 | ThreadPoolExecutor 工作线程 |
 | 回调线程 | 短期 | M | place/cancel Future 结果回传 |
-| 卖出线程 | 短期 | K | _process_trade_sell |
 
 ### 4.2 锁层级（防死锁）
 
@@ -381,7 +384,7 @@ FAILED    → 清理 _pending_sells
 
 1. _actors_lock        (Guardian RLock)     — 最外层
 2. _trade_lock         (Guardian Lock)
-3. _pending_sells_lock (Guardian Lock)
+3. _cache_lock         (Guardian RLock)     — 缓存读写
 4. _sell_lock          (Guardian Lock)      — 最内层
 
 + _state_lock          (每个 Actor RLock)  — 独立，不与上述交叉
@@ -416,53 +419,83 @@ Actor._cancel(reason)
               └─ active_id 仍存在 → 保持 RESTING（订单仍存活）
 ```
 
-### 5.2 人工撤单（放弃市场）
+### 5.2 外部撤单（统一冷却重挂）
 
 ```
-用户点击 Polymarket GUI「Cancel」
+外部来源 CANCELLATION 事件（用户手动 / 交易所自动取消）
     │
     ▼
-User WS → CANCELLATION 事件 → Guardian.handle_order()
+User WS → Guardian.handle_order()
     ├─ is_system_cancel(oid)? → 否
-    └─ _check_abandon(oid, asset_id)  ← 新线程
-          ├─ sleep(2s)  防抖
-          ├─ remove_actor(asset_id)
-          ├─ abandon_logger.info() → abandons.log
-          └─ actor.stop(cancel_active=False)  ← 订单已取消，不重复取消
+    ├─ cancel_logger 记录（source="external"）
+    └─ actor.post(EXTERNAL_CANCEL)
+          └─ Actor: NO_ORDER → COOLING(120s) → 重挂
+
+与 5.1（系统撤单）处理路径完全相同，不区分来源。
 ```
+
+- 不再区分"人工撤单"和"交易所自动取消"，统一走保守策略
+- 由 `discover()` 多周期逻辑检测真正需要放弃的市场（连续 3 次无买单 = 90s 后放弃）
 
 ### 5.3 触发方式对比
 
 | 触发方式 | 处理流程 | 是否放弃市场 |
 |----------|----------|-------------|
-| 用户手动取消 | `_check_abandon()` → `remove_actor()` + `stop()` | ✅ 放弃 |
 | best_bid 变化 | `_cancel()` → COOLING → 重挂 | ❌ 不放弃 |
+| 外部撤单（任意来源） | Actor EXTERNAL_CANCEL → COOLING → 重挂 | ❌ 不放弃 |
 | discover 多周期无买单 | 3 次 NO_ORDER → `remove_actor()` + `stop()` | ✅ 放弃 |
+| market_resolved | actor.stop() → remove_actor() | ✅ 放弃 |
 
 ***
 
-## 六、已修复的关键 Bug
+## 六、版本变更记录
 
-| 级别 | 问题 | 表现 | 修复 |
-|------|------|------|------|
-| P0 | 交易所自动取消 → mass abandon | 全部订单消失、不再守护 | `_check_abandon` 通知 Actor；`discover` 多周期+排除COOLING |
-| P0 | 缺少 REST Heartbeat | 挂单 10~15s 被取消 | 新增 `HeartbeatManager` |
-| P0 | Actor 字典线程不安全 | 竞态崩溃 | 全部改为加锁访问器 |
-| P0 | 撤单失败静默忽略 | 重复下单 | 检查 Future，失败保持 RESTING |
-| P0 | CONFIRMED 事件不含 maker_orders | 买入被静默跳过 | 从 `_pending_sells` 恢复 our_fill |
-| P1 | 下单失败幂等 token 未清理 | 重挂被拦截 300s | `_on_place_done`+`_do_place` 双重清理 |
-| P1 | audit N+1 API 调用 | 每个 Actor 重复查单 | Guardian 传入 order_map |
-| P1 | 回调线程修改状态 | 竞态条件 | CANCEL_DONE/PLACE_DONE 回传队列 |
-| P1 | `_on_cancel_done` 竞态 | 外部撤单后回 RESTING | 检查 active_id+COOLING 双重防护 |
-| P1 | audit stale_timeout 打断冷却 | COOLING 60s 被重置 | 移除 COOLING 从 stale_timeout 检查 |
-| P1 | PING 时序错误 | WS 立即断开 | 先 auth 后 ping；先 sleep 后发 |
-| P1 | 初始 dump 不触发卖出 | 重启后漏卖 | 走完整 `handle_trade()` 链路 |
-| P2 | Heartbeat 400→401 级联 | 心跳失败 | 正则提取 SDK 错误中的 heartbeat_id + raw REST 回退 |
-| P2 | WS 递归线程泄漏 | 线程数增长 | 单线程 while 循环重连 |
-| P2 | 缓存无限增长 | 内存泄漏 | `_prune_caches()` 定期清理 |
-| P2 | `_sell()` 绕过执行层限流 | 潜在限流违规 | 主流程改用 `exec_layer.limit_sell()` |
-| P2 | market_resolved 先移除后 stop | 顺序错误 | 先 stop 后 remove |
-| P2 | limit_sell 价格未对齐 tick_size | 卖单被拒 | `round_to_tick` 对齐后再下单 |
+### V7.1（2026-07-22）：代码审查整改
+
+**死代码清理**：删除 `_sell()` / `sell_position()` / `mark_trade_processed()` / `market_sell()` 及关联配置。
+
+**11 个 Bug 修复**：
+
+| 级别 | 问题 | 修复 |
+|------|------|------|
+| P0 | 下单成功但 order_id 为空，幂等 token 未清除 | `_do_place` 空 oid 走失败路径清除 token |
+| P0 | 撤单失败误放弃市场（`_system_cancels` 被清除） | 撤单失败保留 `_system_cancels`，仅清 `_cancel_tokens` |
+| P0 | `_processed_trades` 清理无序（set→list 随机） | 改为 `Dict[tid, timestamp]`，按时间戳有序淘汰 |
+| P1 | 卖单成交（SELL）未被记录到 trade_logger | 增加 SELL CONFIRMED 日志路径 |
+| P1 | MATCHED 事件 WS 重放时未去重 | `_pending_sells` 检查避免重复处理（后随链路移除） |
+| P1 | WS 引用更新无锁（`_market_ws` 竞态） | `_market_lock` 保护读写 |
+| P1 | `_market_info`/`_ob_cache` 多线程无锁 | 新增 `_cache_lock`（RLock） |
+| P2 | `cancel_timeout` 被复用为下单等待超时 | 新增 `place_timeout=15s` |
+| P2 | 每次 CONFIRMED 创建新线程 | 改用 `exec_layer.submit()` 复用线程池（后随链路移除） |
+| P2 | 非系统撤单立��放弃市场（`_check_abandon`） | 删除 `_check_abandon`，统一走 Actor 冷却重挂 |
+| P2 | `maker_rank` 默认值三方不一致 | 统一为 3 |
+
+### V7.2（2026-07-23）：卖出路径简化
+
+- 删除事件驱动卖出链路：`_pending_sells` / `_on_trade_matched` / `_on_trade_confirmed` / `_on_trade_failed` / `_process_trade_sell`
+- `handle_trade()` 简化为仅记录 CONFIRMED 日志
+- `check_positions()` 成为唯一卖出路径
+- 删除 `exec_layer.submit()`（无调用方）
+- Actor 移除 `_on_trade_matched` 处理器
+
+### 历史修复（V7.0 之前）
+
+| 级别 | 问题 | 修复 |
+|------|------|------|
+| P0 | 交易所自动取消 → mass abandon | `discover` 多周期+排除 COOLING |
+| P0 | 缺少 REST Heartbeat | 新增 `HeartbeatManager` |
+| P0 | Actor 字典线程不安全 | 全部改为加锁访问器 |
+| P0 | 撤单失败静默忽略 | 检查 Future，失败保持 RESTING |
+| P1 | 下单失败幂等 token 未清理 | `_place_tokens` 双重清理 |
+| P1 | audit N+1 API 调用 | Guardian 传入 order_map |
+| P1 | 回调线程修改状态 | CANCEL_DONE/PLACE_DONE 回传队列 |
+| P1 | `_on_cancel_done` 竞态 | active_id+COOLING 双重防护 |
+| P1 | WS ping 时序错误 | 先 auth 后 ping |
+| P2 | Heartbeat 400→401 级联 | SDK 错误正则提取 + raw REST 回退 |
+| P2 | WS 递归线程泄漏 | 单线程 while 循环重连 |
+| P2 | 缓存无限增长 | `_prune_caches()` 定期清理 |
+| P2 | market_resolved 顺序错误 | 先 stop 后 remove |
+| P2 | limit_sell 未对齐 tick_size | `round_to_tick` 对齐 |
 
 ***
 
@@ -479,13 +512,15 @@ guardian_v7/
 ├── actor.py          # Actor：单市场串行状态机，事件队列驱动，异步回调 → 内部事件回传
 ├── ws_manager.py     # WS 管理：市场/用户双频道，单线程重连，代理支持，PING 保活
 ├── ws_router.py      # WS 路由：JSON 解析 → Guardian 分发，initial_dump 完整处理
-├── guardian.py       # 主控：定时循环 + 多周期放弃 + trade/order 处理 + 持仓兜底 + 线程安全 Actor 管理
+├── guardian.py       # 主控：定时循环 + 多周期放弃 + trade 日志 + check_positions 卖出 + 线程安全管理
+├── LOGIC.md          # 策略逻辑文档（详细行为描述）
+├── ARCHITECTURE.md   # 架构文档（本文件）
 ├── data/             # 日志输出目录
 │   ├── guardian.log  # 主日志
 │   ├── trades.log    # 买卖配对记录
-│   ├── cancels.log   # 撤单记录
+│   ├── cancels.log   # 撤单记录（区分 system/external）
 │   └── abandons.log  # 放弃市场记录
-└── tests/            # 79 个单元测试
+└── tests/            # 78 个单元测试
     ├── test_utils.py
     ├── test_models.py
     ├── test_config.py

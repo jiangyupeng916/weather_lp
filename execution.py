@@ -52,10 +52,6 @@ class ExecutionLayer:
             max_workers=cfg.max_workers, thread_name_prefix="exec"
         )
 
-    def submit(self, fn, *args):
-        """复用执行层线程池提交任务，避免无限制创建线程。"""
-        return self._executor.submit(fn, *args)
-
     def shutdown(self, wait: bool = True):
         self._executor.shutdown(wait=wait)
 

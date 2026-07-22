@@ -6,7 +6,7 @@
 关键改进：
  - 非阻塞执行：place/cancel 通过 ExecutionLayer 异步执行
  - 撤单失败保护：取消失败时保持 RESTING 状态，不清除 active_id
- - 部分成交处理：TRADE_MATCHED 后保持 RESTING，由审计发现实际状态
+ - 部分成交由审计发现实际状态（不再通过 EventType.TRADE_MATCHED 处理）
  - tick_size 对齐：_target_price 返回 tick_size 对齐的价格
 """
 
@@ -117,7 +117,6 @@ class AssetActor:
             EventType.PRICE_CHANGE: self._on_price_change,
             EventType.BEST_BID: self._on_best_bid,
             EventType.TICK_SIZE: self._on_tick_size,
-            EventType.TRADE_MATCHED: self._on_trade_matched,
             EventType.RECONNECT: self._on_reconnect,
             EventType.STOP: self._on_stop,
             EventType.AUDIT: self._on_audit,
@@ -196,12 +195,6 @@ class AssetActor:
     def _on_tick_size(self, p: dict):
         self.tick_size = safe_decimal(p.get("new_tick_size")) or self.cfg.tick_size
         logger.info("[TICK] %s tick=%s", self.asset_id[:16], self.tick_size)
-
-    def _on_trade_matched(self, _p: dict):
-        # P1 修复：部分成交不放弃订单，保持 RESTING 状态
-        logger.info("[MATCHED] %s 部分/全部成交，保持 RESTING", self.asset_id[:16])
-        self._pending_reeval = False
-        # 不清除 active_id/active_price，让 discover/audit 发现实际订单状态
 
     def _on_reconnect(self, _p: dict):
         logger.info("[RECONNECT] %s", self.asset_id[:16])
