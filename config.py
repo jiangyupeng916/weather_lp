@@ -19,7 +19,6 @@ class Config:
     # ── 服务端点 ──────────────────────────────────────────────────────────────
     host: str = os.environ.get("CLOB_API_URL", "https://clob.polymarket.com")
     ws_user: str = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
-    ws_market: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     data_api: str = "https://data-api.polymarket.com"
 
     # ── 账户与认证 ────────────────────────────────────────────────────────────
@@ -40,7 +39,7 @@ class Config:
 
     # ── Maker 挂单策略 ────────────────────────────────────────────────────────
     maker_size: Decimal = Decimal("50")
-    maker_rank: int = 3
+    maker_rank: int = 2
     maker_cooldown: float = 120.0
     tick_size: Decimal = Decimal("0.01")
 
@@ -52,6 +51,7 @@ class Config:
 
     # ── 定时任务间隔 ──────────────────────────────────────────────────────────
     discover_interval: float = 30.0
+    best_bid_poll_interval: float = 3.0
     audit_interval: float = 120.0
     position_interval: float = 120.0
     cache_prune_interval: float = 300.0
@@ -70,7 +70,6 @@ class Config:
     # ── WebSocket 连接 ────────────────────────────────────────────────────────
     ws_reconnect_delay: float = 5.0
     user_ping_interval: float = 50.0
-    market_ping_interval: float = 10.0
 
     # ── 心跳 (Heartbeat) ─────────────────────────────────────────────────────
     heartbeat_interval: float = 7.0

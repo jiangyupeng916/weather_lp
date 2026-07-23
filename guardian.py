@@ -4,7 +4,8 @@
 
 职责：
  - 管理 AssetActor 生命周期（线程安全）
- - 定时任务：discover / audit / check_positions / cache_prune
+ - 定时任务：discover / poll_best_bids / audit / check_positions / cache_prune
+ - 批量轮询 best_bid 替代 WebSocket 市场频道
  - 交易日志：记录 CONFIRMED 事件到 trade_logger
  - 启动/关闭编排（心跳先于订单，关闭时订单先于心跳）
 """
@@ -199,6 +200,69 @@ class Guardian:
             logger.error("best_bid 失败: %s... | %s", token_id[:20], e)
             return None
 
+    def get_order_book_bids(self, token_id: str) -> List[Decimal]:
+        """通过 REST API 获取买盘价格列表，从高到低排序。"""
+        try:
+            ob = self.client.get_order_book(token_id)
+            bids_raw = ob.get("bids", []) if ob else []
+            prices: List[Decimal] = []
+            for b in bids_raw:
+                pr = safe_decimal(b.get("price"))
+                sz = safe_decimal(b.get("size"))
+                if pr and sz and sz > 0:
+                    prices.append(pr)
+            prices.sort(reverse=True)
+            return prices
+        except Exception as e:
+            logger.error("获取订单簿失败: %s... | %s", token_id[:20], e)
+            return []
+
+    def _poll_best_bids(self):
+        """批量查询所有市场的 best_bid，检测变化后通知 Actor。"""
+        token_ids = self.list_actor_ids()
+        if not token_ids:
+            return
+
+        try:
+            r = requests.post(
+                f"{self.cfg.host}/books",
+                json=[{"token_id": tid} for tid in token_ids],
+                timeout=10,
+            )
+            if r.status_code != 200:
+                logger.error("[POLL] 批量查询失败 HTTP %s", r.status_code)
+                return
+            books = r.json()
+        except Exception as e:
+            logger.error("[POLL] 批量查询异常: %s", e)
+            return
+
+        polled = 0
+        for item in (books if isinstance(books, list) else []):
+            aid = item.get("asset_id", "")
+            actor = self.get_actor(aid)
+            if not actor or actor.state is ActorState.STOPPED:
+                continue
+
+            bids = item.get("bids", [])
+            if not bids:
+                continue
+
+            best_bid_str = bids[0].get("price", "")
+            best_ask_str = ""
+            asks = item.get("asks", [])
+            if asks:
+                best_ask_str = asks[0].get("price", "")
+
+            if best_bid_str:
+                actor.post(ActorEvent(EventType.BEST_BID, {
+                    "best_bid": best_bid_str,
+                    "best_ask": best_ask_str,
+                }))
+                polled += 1
+
+        logger.debug("[POLL] 轮询 %d 个 Actor", polled)
+
     def positions(self) -> List[dict]:
         try:
             r = requests.get(
@@ -243,16 +307,8 @@ class Guardian:
             logger.info("[DISCOVER] 新市场 %s price=%s", asset_id[:20], o.price)
             actor = AssetActor(asset_id, self, initial=o)
             self.add_actor(asset_id, actor)
-            self._sub_market(asset_id)
 
         logger.info("[DISCOVER] 守护 %d 个市场", self.actor_count())
-
-    def _sub_market(self, asset_id: str):
-        self.ws_manager.market_send({
-            "assets_ids": [asset_id],
-            "type": "market",
-            "custom_feature_enabled": True,
-        })
 
     # ── 审计 ──────────────────────────────────────────────────────────────────
     def audit(self):
@@ -467,19 +523,8 @@ class Guardian:
         # 3. 发现已有订单
         self.discover()
 
-        # 4. 市场频道
-        if self.actor_count() > 0:
-            self.ws_manager.start_market(
-                on_open=lambda ws: ws.send(json.dumps({
-                    "assets_ids": self.list_actor_ids(),
-                    "type": "market",
-                    "custom_feature_enabled": True,
-                })),
-                on_message=self.ws_router.on_market_message,
-            )
-
-        # 5. 主循环
-        last_discover = last_audit = last_position = last_prune = time.time()
+        # 4. 主循环
+        last_discover = last_poll = last_audit = last_position = last_prune = time.time()
         while self.running:
             try:
                 now = time.time()
@@ -487,15 +532,10 @@ class Guardian:
                 if now - last_discover >= self.cfg.discover_interval:
                     self.discover()
                     last_discover = now
-                    if self.actor_count() > 0:
-                        self.ws_manager.start_market(
-                            on_open=lambda ws: ws.send(json.dumps({
-                                "assets_ids": self.list_actor_ids(),
-                                "type": "market",
-                                "custom_feature_enabled": True,
-                            })),
-                            on_message=self.ws_router.on_market_message,
-                        )
+
+                if now - last_poll >= self.cfg.best_bid_poll_interval:
+                    self._poll_best_bids()
+                    last_poll = now
 
                 if now - last_audit >= self.cfg.audit_interval:
                     self.audit()

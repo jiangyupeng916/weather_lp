@@ -41,40 +41,39 @@ utils.py    ← 无内部依赖（纯函数工具）
 ### 2.2 数据流全景
 
 ```
-                           ┌─── REST API ───┐
-                           │                 │
-                  ┌────────▼──────┐  ┌───────▼──────────┐
+                           ┌─── REST API ───────┐
+                           │                     │
+                  ┌────────▼──────┐  ┌───────────▼──────┐
                   │ HeartbeatManager│ │ ExecutionLayer    │
                   │ (每7s心跳)      │  │ (限流+线程池)      │
                   │ 维持订单存活     │  │ place/cancel/     │
                   │                │  │ limit_sell        │
                   └────────────────┘  └────────┬──────────┘
                                                │ Future
-  ┌──────────────┐              ┌──────────────┤
-  │ Market WS ◄──┼──────────────┤              │
-  │ book 快照     │              │              │
-  │ best_bid_ask │    ┌─────────▼──────────┐   │
-  │ price_change │    │  WSRouter          │   │
-  │ tick_size    │    │  解析JSON → 分发    │   │
-  │ resolved     │    └──┬──────────┬──────┘   │
-  └──────────────┘       │          │          │
-                         │          │          │
-  ┌──────────────┐       │          │          │
-  │ User WS  ◄───┼───────┘          │          │
-  │ trade 事件    │                  │          │
-  │ (MATCHED/    │     ┌────────────▼────┐     │
-  │  CONFIRMED/  │     │ Guardian 主控   │     │
-  │  FAILED)     │     │ discover(30s)  │     │
-  │ order 事件    │     │ audit(120s)    ├─────┘
-  │ (PLACEMENT/  │     │ positions(120s)│
-  │  CANCELLATION│     │ prune(300s)    │
-  └──────────────┘     └───────┬────────┘
-                               │ post(ActorEvent)
-                       ┌───────▼────────┐
-                       │ AssetActor×N   │
-                       │ 串行状态机      │
-                       │ 每市场一个实例   │
-                       └────────────────┘
+  ┌──────────────────┐          ┌──────────────┤
+  │ POST /books 轮询  │          │              │
+  │ (每3s 查best_bid) │  ┌───────▼──────────┐   │
+  │ 200 市场批量      │  │  WSRouter        │   │
+  └────────┬─────────┘  │  用户频道消息分发  │   │
+           │             └──┬───────────────┘   │
+           │                │          │         │
+  ┌────────┼────────┐       │          │         │
+  │ User WS◄────────┼───────┘          │         │
+  │ trade 事件       │                  │         │
+  │ (MATCHED/       │     ┌────────────▼────┐    │
+  │  CONFIRMED/     │     │ Guardian 主控   │    │
+  │  FAILED)        │     │ discover(30s)  │    │
+  │ order 事件       │     │ poll(3s)       ├────┘
+  │ (PLACEMENT/     │     │ audit(120s)    │
+  │  CANCELLATION)  │     │ positions(120s)│
+  └─────────────────┘     │ prune(300s)    │
+                          └───────┬────────┘
+                                  │ post(ActorEvent)
+                          ┌───────▼────────┐
+                          │ AssetActor×N   │
+                          │ 串行状态机      │
+                          │ 每市场一个实例   │
+                          └────────────────┘
 ```
 
 ***
@@ -248,11 +247,9 @@ check_positions() 每 120s 执行：
 - 撤单失败时保持 RESTING（订单仍存活于交易所），不清除 `active_id`
 - 成交后保持 RESTING（部分成交≠全部成交），由审计验证实际订单状态
 
-**数据源合并**：
+**数据源**：
 
-`self.bids` 由两类 WS 事件共同维护：
-- `book`（订单簿快照）：全量替换 `self.bids`
-- `price_change`（增量更新）：插入/删除单个报价档位
+挂单前通过 REST API `GET /book` 实时获取订单簿买盘数据计算目标价格，不再通过 WebSocket 维护本地订单簿副本。WebSocket 仅用于接收 `best_bid_ask` 事件作为撤单触发器。
 
 **关键行为**：
 
@@ -270,28 +267,19 @@ check_positions() 每 120s 执行：
 - `_ws_on_open()`：先执行业务回调（auth/订阅），再启动 PING 线程
 - PING 线程：先 sleep 后发 PING（避免刚连接立即发 PING 被服务器拒绝）
 - 自动读取 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量配置代理
-- `start_market()` / `start_user()` 带互斥锁，同频道只有一个连接线程
-- `market_send()`：线程安全地向市场频道发送订阅消息
+- `start_user()` 带互斥锁，只有一个用户频道连接线程
 
-**WSRouter**（消息分发）：
-
-- 市场频道：
-
-| event_type | 处理 |
-|------------|------|
-| `book` | → Actor `BOOK_SNAPSHOT` |
-| `price_change` | → Actor `PRICE_CHANGE`（逐条） |
-| `best_bid_ask` | → Actor `BEST_BID` |
-| `tick_size_change` | → Actor `TICK_SIZE` |
-| `market_resolved` | → Actor `STOP` → `remove_actor()` |
-
-- 用户频道：
+**WSRouter**（消息分发，仅用户频道）：
 
 | event_type | 处理 |
 |------------|------|
 | `trade`（MATCHED/CONFIRMED/FAILED） | → `Guardian.handle_trade()` |
 | `order`（PLACEMENT/CANCELLATION） | → `Guardian.handle_order()` |
 | `channel: "user"`（initial_dump） | → 所有历史 trade 路由到 `handle_trade()` 统一处理 |
+
+**best_bid 变化检测**（替代市场 WS）：
+
+Guardian 每 3s 通过 `POST /books` 批量查询所有市场的订单簿，提取 best_bid 与 Actor 本地缓存对比，变化时以 `BEST_BID` 事件推送到 Actor。
 
 ### 3.8 guardian.py — 主控制器
 
@@ -406,9 +394,8 @@ WS CANCELLATION 事件不再处理（仅记录 debug 日志）。撤单完全由
 
 | 触发方式 | 处理流程 | 是否放弃市场 |
 |----------|----------|-------------|
-| best_bid 变化 | `_cancel()` → COOLING → 重挂 | ❌ 不放弃 |
+| best_bid 变化（批量轮询） | `_cancel()` → COOLING → 重挂 | ❌ 不放弃 |
 | audit 纠偏 | `exec_layer.cancel()` + `CANCEL_DONE` | ❌ 不放弃 |
-| market_resolved | actor.stop() → remove_actor() | ✅ 放弃 |
 
 ***
 
@@ -504,8 +491,8 @@ guardian_v7/
 | `heartbeat.py` | Guardian | 保持订单存活 | `start()`, `stop()` |
 | `execution.py` | Guardian/Actor | 限流异步执行 | `place()`, `cancel()`, `limit_sell()`, `clear_place()` |
 | `actor.py` | Guardian | 单市场挂单逻辑 | `post()`, `stop()`, `force_stop()`, `state`, `active_id` |
-| `ws_manager.py` | Guardian | WS 连接生命周期 | `start()`, `stop()`, `start_market()`, `start_user()`, `market_send()` |
-| `ws_router.py` | Guardian | WS 消息分发 | `on_market_message()`, `on_user_message()` |
+| `ws_manager.py` | Guardian | WS 连接生命周期 | `start()`, `stop()`, `start_user()` |
+| `ws_router.py` | Guardian | WS 消息分发（仅用户频道） | `on_user_message()` |
 | `guardian.py` | main.py | 全盘协调 | `run()`, `handle_trade()`, `handle_order()`, `discover()` |
 
 ***

@@ -19,11 +19,7 @@ class ActorState(Enum):
 
 
 class EventType(Enum):
-    BOOK_SNAPSHOT = auto()
-    PRICE_CHANGE = auto()
-    BEST_BID = auto()
-    TICK_SIZE = auto()
-    RECONNECT = auto()
+    BEST_BID = auto()       # 轮询检测到 best_bid 变化
     STOP = auto()
     AUDIT = auto()
     COOLDOWN_EXPIRED = auto()

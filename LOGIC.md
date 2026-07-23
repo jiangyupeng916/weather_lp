@@ -172,9 +172,7 @@ Actor 通过事件队列（`queue.Queue`）接收外部事件，在自己的线�
 
 | 事件 | 来源 | 触发条件 |
 |------|------|---------|
-| BOOK_SNAPSHOT | 市场 WS | 订单簿全量快照 |
-| PRICE_CHANGE | 市场 WS | 某个档位的价格或数量变化 |
-| BEST_BID | 市场 WS | best_bid 或 best_ask 变化 |
+| BEST_BID | 批量轮询 `POST /books` | best_bid 变化（每 3s） |
 | COOLDOWN_EXPIRED | 内部定时器 | 冷却期结束 |
 | AUDIT | Guardian 主循环 | 每 120s 审计检查 |
 
@@ -184,12 +182,9 @@ Actor 通过事件队列（`queue.Queue`）接收外部事件，在自己的线�
 
 ### 8.1 订单簿数据来源
 
-Actor 的 `self.bids` 字典由两类 WebSocket 事件共同维护：
+挂单前通过 REST API `GET /book?token_id=...` 实时获取当前买盘数据。
 
-- **book（快照）**：全量替换。在 WS 连接或重连时收到，包含完整的买卖盘数据。
-- **price_change（增量）**：单条更新。在快照之后持续推送，只包含变化的档位。
-
-两者配合保证订单簿数据的实时性和完整性。如果 price_change 中说某档位的数量变为 0，则从字典中删除该档位。
+best_bid 变化检测：每 3s 通过 `POST /books` 批量查询所有市场的 best_bid，与 Actor 缓存值对比。变化时以 `BEST_BID` 事件推送到 Actor，触发撤单+冷却+重挂。
 
 ### 8.2 best_bid 变化检测
 
@@ -236,7 +231,8 @@ Polymarket 要求通过 REST API 每约 10 秒发送一次心跳（`POST /v1/hea
 
 | 任务 | 间隔 | 职责 |
 |------|------|------|
-| discover() | 30s | 发现新订单创建 Actor；清理 STOPPED 状态 Actor；更新市场 WS 订阅 |
+| discover() | 30s | 发现新订单创建 Actor；清理 STOPPED 状态 Actor |
+| _poll_best_bids() | 3s | 批量查询 `POST /books`，检测 best_bid 变化推送给 Actor |
 | audit() | 120s | 纠偏超价订单；检测订单丢失；状态卡死重置 |
 | check_positions() | 120s | 扫描持仓 → 补挂限价卖单（唯一卖出路径） |
 | _prune_caches() | 300s | 清理过期缓存，防止内存泄漏 |
@@ -267,18 +263,15 @@ Polymarket 要求通过 REST API 每约 10 秒发送一次心跳（`POST /v1/hea
 
 ## 十二、WebSocket 管理
 
-### 双频道架构
+### 单频道架构
 
-- **用户频道**（`/ws/user`）：接收 trade 事件（用于日志记录）和 order 事件（PLACEMENT/CANCELLATION，用于撤单处理）
-- **市场频道**（`/ws/market`）：接收订单簿数据（book/price_change/best_bid_ask/tick_size_change/resolved）
+仅保留**用户频道**（`/ws/user`）：接收 trade 事件（用于日志记录）和 order 事件（日志记录）。
+
+市场数据（best_bid）不再通过 WebSocket 获取，改为每 3s 批量轮询 `POST /books` REST API。
 
 ### 重连策略
 
-每个频道由独立线程管理，线程内 while 循环处理"连接→断开→重连"。断线后等待 `ws_reconnect_delay`（默认 5s）重连。
-
-### PING 保活
-
-连接建立后，先执行业务回调（auth/订阅），再启动 PING 线程。PING 先 sleep 后发送，避免刚连接时立即 PING 被服务器拒绝。
+用户频道由独立线程管理，线程内 while 循环处理"连接→断开→重连"。断线后等待 `ws_reconnect_delay`（默认 5s）重连。
 
 ---
 

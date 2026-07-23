@@ -16,7 +16,7 @@ import queue
 import threading
 import time
 from decimal import Decimal
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Optional
 
 from config import Config
 from models import (
@@ -25,7 +25,7 @@ from models import (
     ActorEvent,
     OrderInfo,
 )
-from utils import safe_decimal, round_to_tick, safe_float_from_decimal
+from utils import safe_decimal, round_to_tick
 
 if TYPE_CHECKING:
     from guardian import Guardian
@@ -48,7 +48,6 @@ class AssetActor:
         self._worker = threading.Thread(target=self._loop, daemon=True)
 
         # ── 订单簿状态 ────────────────────────────────────────────────────────
-        self.bids: Dict[Decimal, Decimal] = {}
         self.tick_size: Decimal = self.cfg.tick_size
         self.best_bid: Optional[Decimal] = None
         self.best_ask: Optional[Decimal] = None
@@ -110,11 +109,7 @@ class AssetActor:
 
     def _handle(self, evt: ActorEvent):
         handlers = {
-            EventType.BOOK_SNAPSHOT: self._on_book,
-            EventType.PRICE_CHANGE: self._on_price_change,
             EventType.BEST_BID: self._on_best_bid,
-            EventType.TICK_SIZE: self._on_tick_size,
-            EventType.RECONNECT: self._on_reconnect,
             EventType.STOP: self._on_stop,
             EventType.AUDIT: self._on_audit,
             EventType.COOLDOWN_EXPIRED: self._on_cooldown_expired,
@@ -134,30 +129,6 @@ class AssetActor:
         logger.info("[STATE] %s %s -> %s | %s", self.asset_id[:16], old.name, new.name, reason)
 
     # ── 事件处理器 ────────────────────────────────────────────────────────────
-    def _on_book(self, p: dict):
-        self.bids.clear()
-        for e in p.get("bids", []):
-            pr = safe_decimal(e.get("price"))
-            sz = safe_decimal(e.get("size"))
-            if pr and sz and sz > 0:
-                self.bids[pr] = sz
-        if self.state is ActorState.NO_ORDER and self._cooldown_timer is None:
-            target = self._target_price()
-            if target:
-                self._place(target)
-
-    def _on_price_change(self, p: dict):
-        if str(p.get("side", "")).upper() != "BUY":
-            return
-        pr = safe_decimal(p.get("price"))
-        sz = safe_decimal(p.get("size"))
-        if pr is None or sz is None:
-            return
-        if sz == Decimal("0"):
-            self.bids.pop(pr, None)
-        else:
-            self.bids[pr] = sz
-
     def _on_best_bid(self, p: dict):
         new_bid = safe_decimal(p.get("best_bid"))
         new_ask = safe_decimal(p.get("best_ask"))
@@ -182,21 +153,6 @@ class AssetActor:
             self._cancel("best_bid变化")
         elif self.state is ActorState.NO_ORDER and self._cooldown_timer is None:
             self._start_cooldown()
-
-    def _on_tick_size(self, p: dict):
-        self.tick_size = safe_decimal(p.get("new_tick_size")) or self.cfg.tick_size
-        logger.info("[TICK] %s tick=%s", self.asset_id[:16], self.tick_size)
-
-    def _on_reconnect(self, _p: dict):
-        logger.info("[RECONNECT] %s", self.asset_id[:16])
-        self.bids.clear()
-        self.best_bid = None
-        self.best_ask = None
-        if self.state in (ActorState.RESTING, ActorState.PLACING) and self.active_id:
-            self._cancel("WSS重连")
-        else:
-            self.guardian.exec_layer.clear_place_by_asset(self.asset_id)
-            self._to(ActorState.NO_ORDER, "重连等待数据")
 
     def _on_stop(self, p: dict):
         cancel_active = p.get("cancel_active", True)
@@ -345,11 +301,11 @@ class AssetActor:
 
     # ── 价格计算 ──────────────────────────────────────────────────────────────
     def _target_price(self) -> Optional[Decimal]:
-        sorted_bids = sorted(self.bids.keys(), reverse=True)
-        if len(sorted_bids) < self.cfg.maker_rank:
+        """通过 REST API 获取订单簿买盘，返回第 maker_rank 档的价格。"""
+        bids = self.guardian.get_order_book_bids(self.asset_id)
+        if len(bids) < self.cfg.maker_rank:
             return None
-        raw = sorted_bids[self.cfg.maker_rank - 1]
-        # P1 修复：对齐到 tick_size
+        raw = bids[self.cfg.maker_rank - 1]
         return round_to_tick(raw, self.tick_size)
 
 
