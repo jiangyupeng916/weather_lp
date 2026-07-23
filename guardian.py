@@ -59,7 +59,6 @@ def _file_logger(name: str) -> logging.Logger:
 
 
 trade_logger = _file_logger("trades")
-cancel_logger = _file_logger("cancels")
 abandon_logger = _file_logger("abandons")
 
 
@@ -349,11 +348,12 @@ class Guardian:
                     to_cancel.append((o, f"审计: price {o.price} >= best_bid {bb}"))
 
         for o, reason in to_cancel:
+            self.exec_layer.cancel(o.order_id, reason)
             actor = self.get_actor(o.token_id)
             if actor:
-                actor.post(ActorEvent(EventType.EXTERNAL_CANCEL, {"order_id": o.order_id}))
-            else:
-                self.exec_layer.cancel(o.order_id, reason)
+                actor.post(ActorEvent(EventType.CANCEL_DONE, {
+                    "order_id": o.order_id, "ok": True, "reason": reason,
+                }))
             time.sleep(self.cfg.cancel_delay)
         logger.info("[AUDIT] 完成 | 纠偏 %d 个", len(to_cancel))
 
@@ -410,35 +410,10 @@ class Guardian:
 
     # ── 订单事件 ──────────────────────────────────────────────────────────────
     def handle_order(self, data: dict):
+        """订单事件：只记录日志，不做业务处理。"""
         otype = str(data.get("type", ""))
-        oid = data.get("id", "")
-        side = str(data.get("side", "")).upper()
-        asset_id = data.get("asset_id", "")
-
-        if otype == "CANCELLATION":
-            if self.exec_layer.is_system_cancel(oid):
-                logger.info("[CANCEL] 系统撤单确认 %s", oid[:20])
-                cancel_logger.info(json.dumps({
-                    "order_id": oid, "asset_id": asset_id, "side": side,
-                    "source": "system", "reason": "bot主动撤单确认",
-                }, ensure_ascii=False))
-                if asset_id and side == "BUY":
-                    actor = self.get_actor(asset_id)
-                    if actor:
-                        actor.post(ActorEvent(EventType.EXTERNAL_CANCEL, {"order_id": oid}))
-                return
-
-            # 非系统撤单：统一走 Actor 通知 → 冷却重挂，避免将交易所自动取消误判为人工撤单
-            # 真正需要放弃的市场由 discover() 多周期逻辑处理
-            logger.info("[EXT CANCEL] 外部撤单 %s asset=%s", oid[:20], asset_id[:20])
-            cancel_logger.info(json.dumps({
-                "order_id": oid, "asset_id": asset_id, "side": side,
-                "source": "external", "reason": "外部撤单-冷却重挂",
-            }, ensure_ascii=False))
-            if asset_id and side == "BUY":
-                actor = self.get_actor(asset_id)
-                if actor:
-                    actor.post(ActorEvent(EventType.EXTERNAL_CANCEL, {"order_id": oid}))
+        oid = str(data.get("id", ""))
+        logger.debug("[ORDER EVENT] type=%s id=%s", otype, oid[:20])
 
     # ── 持仓兜底 ──────────────────────────────────────────────────────────────
     def check_positions(self):

@@ -43,7 +43,6 @@ class ExecutionLayer:
         self._cfg = cfg
         self._cancel_tokens: Set[str] = set()
         self._place_tokens: Dict[str, float] = {}
-        self._system_cancels: Set[str] = set()
         self._lock_cancel = threading.Lock()
         self._lock_place = threading.Lock()
         self._lock_rate = threading.Lock()
@@ -70,7 +69,6 @@ class ExecutionLayer:
                 to_remove = list(self._cancel_tokens)[: self.CANCEL_TOKEN_MAX // 2]
                 for oid in to_remove:
                     self._cancel_tokens.discard(oid)
-                    self._system_cancels.discard(oid)
 
     def cancel(self, order_id: str, reason: str = "") -> Future:
         """异步撤单，返回 Future[bool]。"""
@@ -86,7 +84,6 @@ class ExecutionLayer:
                 fut.set_result(True)
                 return fut
             self._cancel_tokens.add(order_id)
-            self._system_cancels.add(order_id)
 
         self._executor.submit(self._do_cancel, order_id, reason, fut)
         return fut
@@ -98,8 +95,6 @@ class ExecutionLayer:
             logger.info("[CANCEL OK] %s... | %s", order_id[:20], reason)
             fut.set_result(True)
         except Exception as e:
-            # 仅清除 _cancel_tokens 允许重试；保留 _system_cancels
-            # 以便 WS 推送 CANCELLATION 时能正确识别为系统撤单（避免误判为人工撤单）
             with self._lock_cancel:
                 self._cancel_tokens.discard(order_id)
             logger.error("[CANCEL FAIL] %s... | %s", order_id[:20], e)
@@ -199,11 +194,4 @@ class ExecutionLayer:
             for t in to_remove:
                 self._place_tokens.pop(t, None)
 
-    def is_system_cancel(self, order_id: str) -> bool:
-        """判断是否为系统发起的撤单，若是则移除令牌并返回 True。"""
-        self._prune_cancel_tokens()
-        with self._lock_cancel:
-            if order_id in self._system_cancels:
-                self._system_cancels.discard(order_id)
-                return True
-            return False
+

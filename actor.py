@@ -61,7 +61,6 @@ class AssetActor:
         self._state_at = time.time()
         self.active_id: Optional[str] = None
         self.active_price: Optional[Decimal] = None
-        self._pending_reeval = False
         self._cooldown_timer: Optional[threading.Timer] = None
 
         # ── 接管已有订单 ──────────────────────────────────────────────────────
@@ -121,7 +120,6 @@ class AssetActor:
             EventType.STOP: self._on_stop,
             EventType.AUDIT: self._on_audit,
             EventType.COOLDOWN_EXPIRED: self._on_cooldown_expired,
-            EventType.EXTERNAL_CANCEL: self._on_external_cancel,
             EventType.ORDER_PLACED: self._on_order_placed,
             EventType.CANCEL_DONE: self._on_cancel_done,
             EventType.PLACE_DONE: self._on_place_done,
@@ -187,8 +185,6 @@ class AssetActor:
 
         if self.state is ActorState.RESTING:
             self._cancel("best_bid变化")
-        elif self.state is ActorState.PLACING:
-            self._pending_reeval = True
         elif self.state is ActorState.NO_ORDER and self._cooldown_timer is None:
             self._start_cooldown()
 
@@ -201,7 +197,6 @@ class AssetActor:
         self.bids.clear()
         self.best_bid = None
         self.best_ask = None
-        self._pending_reeval = False
         if self.state in (ActorState.RESTING, ActorState.PLACING) and self.active_id:
             self._cancel("WSS重连")
         else:
@@ -227,7 +222,6 @@ class AssetActor:
             self.guardian.exec_layer.clear_place_by_asset(self.asset_id)
             self.active_id = None
             self.active_price = None
-            self._pending_reeval = False
             self._to(ActorState.NO_ORDER, "审计超时")
             self._start_cooldown()
             return
@@ -257,17 +251,6 @@ class AssetActor:
             return
         self._place(target)
 
-    def _on_external_cancel(self, p: dict):
-        oid = p.get("order_id", "")
-        if self.active_id and self.active_id == oid:
-            logger.info("[EXT CANCEL] %s %s", self.asset_id[:16], oid[:20])
-            self.active_id = None
-            self.active_price = None
-            if self.state in (ActorState.RESTING, ActorState.CANCELING, ActorState.PLACING):
-                self._pending_reeval = False
-                self._to(ActorState.NO_ORDER, "外部撤单")
-                self._start_cooldown()
-
     def _on_order_placed(self, p: dict):
         oid = p.get("order_id", "")
         price = safe_decimal(p.get("price"))
@@ -283,11 +266,6 @@ class AssetActor:
         self._to(ActorState.RESTING, f"下单确认 {oid[:20]}")
         if price is not None:
             self.guardian.exec_layer.clear_place(self.asset_id, price)
-        if self._pending_reeval:
-            self._pending_reeval = False
-            logger.info("[RE-EVAL] %s 下单后 best_bid 已变，撤单重挂", self.asset_id[:16])
-            self._cancel("best_bid变化(延迟)")
-
     # ── 动作 ──────────────────────────────────────────────────────────────────
     def _cancel(self, reason: str = ""):
         if not self.active_id:
@@ -320,22 +298,18 @@ class AssetActor:
                 logger.warning("[CANCEL FAIL] %s 订单已不存在，忽略取消失败", oid[:20])
                 return
             logger.error("[CANCEL FAIL] %s 订单仍存活在交易所！保持 RESTING", oid[:20])
-            self._pending_reeval = False
             self._to(ActorState.RESTING, "撤单失败-订单仍存活")
             return
 
         self.active_id = None
         self.active_price = None
-        self._pending_reeval = False
-        # 如果外部撤单已先处理（已在 COOLING），不重复启动冷却
         if self.state is ActorState.COOLING:
-            logger.info("[CANCEL OK] %s 外部已处理，保持 COOLING", oid[:20])
+            logger.info("[CANCEL OK] %s 已在 COOLING，跳过", oid[:20])
             return
         self._to(ActorState.NO_ORDER, f"撤单成功 | {reason}")
         self._start_cooldown()
 
     def _place(self, target: Decimal):
-        self._pending_reeval = False
         self._to(ActorState.PLACING, f"target={target}")
 
         fut = self.guardian.exec_layer.place(self.asset_id, target, self.cfg.maker_size, self.tick_size)
@@ -362,9 +336,6 @@ class AssetActor:
             self._to(ActorState.RESTING, f"{oid[:20]}... price={target}")
             if target is not None:
                 self.guardian.exec_layer.clear_place(self.asset_id, target)
-            if self._pending_reeval:
-                self._pending_reeval = False
-                self._cancel("best_bid变化(下单后)")
         else:
             self.active_id = None
             self.active_price = None

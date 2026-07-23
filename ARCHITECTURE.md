@@ -9,7 +9,6 @@ Guardian V7 是一个 **Polymarket CLOB 交易平台的 Maker-only 自动化做�
 **关键行为规则**：
 
 - **系统撤单**（best_bid 变化 / target_price 变化 / WSS 重连）：Actor 冷却 120s → 重新挂单
-- **外部撤单**（用户手动 / 交易所自动取消）：统一走 Actor 通知 → 冷却重挂；真正需要放弃的市场由 `discover()` 多周期检测清理
 - **卖出**：不依赖 WS 事件驱动，由 `check_positions()` 每 120s 定时扫描持仓 → 补挂限价卖单
 
 **技术栈**：Python 3.12+ | `py_clob_client_v2` | `websocket-client` | `eth_account` | `requests`
@@ -146,7 +145,7 @@ check_positions() 每 120s 执行：
 ### 3.2 models.py — 数据模型
 
 - **`ActorState`**：`NO_ORDER → PLACING → RESTING → CANCELING → COOLING → STOPPED`
-- **`EventType`**：13 种事件类型，含 2 个内部事件（`CANCEL_DONE`、`PLACE_DONE`）
+- **`EventType`**：12 种事件类型，含 2 个内部事件（`CANCEL_DONE`、`PLACE_DONE`）
 - **`OrderInfo`** / **`TradeRecord`** / **`MarketInfo`**：纯数据载体
 - **`PlaceRequest`** / **`CancelRequest`**：执行层入参
 
@@ -200,7 +199,6 @@ check_positions() 每 120s 执行：
 | `limit_sell(asset_id, price, size, tick_size)` | 下限价卖单（SELL, GTC） | `Future[Optional[str]]` order_id |
 | `clear_place(asset_id, price)` | 清除下单幂等 token | — |
 | `clear_place_by_asset(asset_id)` | 清除某资产全部下单 token | — |
-| `is_system_cancel(order_id)` | 判断是否为系统撤单（一次性） | bool |
 
 ### 3.6 actor.py — 单市场状态机
 
@@ -262,10 +260,8 @@ check_positions() 每 120s 执行：
 |------|------|
 | best_bid 首次接收到 | 仅记录，不触发动作 |
 | best_bid 变化 + RESTING | 撤单重挂 |
-| best_bid 变化 + PLACING | 设 `_pending_reeval` 标志，下单完成后立即撤单 |
 | best_bid 变化 + NO_ORDER | 启动冷却 |
 | target_price 变化 + RESTING | `_check_target_changed()` 触发撤单 |
-| 外部撤单确认 | 清除 active_id，进入 COOLING |
 
 ### 3.7 ws_manager.py + ws_router.py — WebSocket 层
 
@@ -319,7 +315,6 @@ check_positions() 每 120s 执行：
   → COOLING 状态不计数（有定时器等待重挂）
 ```
 
-- 不再有 `_check_abandon()` 立即放弃路径，所有非系统撤单统一走 Actor 冷却重挂
 - `audit()` 在全局无买单时额外清理 NO_ORDER 状态的 Actor
 
 **handle_trade() — 仅记录日志**：
@@ -336,9 +331,8 @@ check_positions() 每 120s 执行：
 **handle_order() — 订单事件处理**：
 
 ```
-系统撤单 → cancel_logger 记录 → Actor EXTERNAL_CANCEL → COOLING → 重挂
-外部撤单 → cancel_logger 记录 → Actor EXTERNAL_CANCEL → COOLING → 重挂
-          （统一处理，不区分人工/交易所，不再放弃市场）
+仅记录 debug 日志，不做业务处理。
+撤单闭环由 Actor._cancel() → CANCEL_DONE 内部事件完成。
 ```
 
 **check_positions() — 唯一卖出路径**：
@@ -402,13 +396,13 @@ check_positions() 每 120s 执行：
 
 ## 五、撤单处理机制
 
-### 5.1 系统撤单（bot 主动撤单后重挂）
+### 唯一撤单路径：系统主动撤单
 
 ```
-best_bid 变化 / target_price 变化 / WSS 重连
+best_bid 变化 / target_price 变化 / WSS 重连 / audit 纠偏
     │
     ▼
-Actor._cancel(reason)
+Actor._cancel(reason)  或  audit → exec_layer.cancel() + CANCEL_DONE
     ├─ state → CANCELING
     └─ ExecutionLayer.cancel(oid, reason) → Future
           ├─ 成功 → CANCEL_DONE(ok=True)
@@ -419,30 +413,14 @@ Actor._cancel(reason)
               └─ active_id 仍存在 → 保持 RESTING（订单仍存活）
 ```
 
-### 5.2 外部撤单（统一冷却重挂）
+WS CANCELLATION 事件不再处理（仅记录 debug 日志）。撤单完全由 `CANCEL_DONE` 内部事件闭环。
 
-```
-外部来源 CANCELLATION 事件（用户手动 / 交易所自动取消）
-    │
-    ▼
-User WS → Guardian.handle_order()
-    ├─ is_system_cancel(oid)? → 否
-    ├─ cancel_logger 记录（source="external"）
-    └─ actor.post(EXTERNAL_CANCEL)
-          └─ Actor: NO_ORDER → COOLING(120s) → 重挂
-
-与 5.1（系统撤单）处理路径完全相同，不区分来源。
-```
-
-- 不再区分"人工撤单"和"交易所自动取消"，统一走保守策略
-- 由 `discover()` 多周期逻辑检测真正需要放弃的市场（连续 3 次无买单 = 90s 后放弃）
-
-### 5.3 触发方式对比
+### 触发方式对比
 
 | 触发方式 | 处理流程 | 是否放弃市场 |
 |----------|----------|-------------|
 | best_bid 变化 | `_cancel()` → COOLING → 重挂 | ❌ 不放弃 |
-| 外部撤单（任意来源） | Actor EXTERNAL_CANCEL → COOLING → 重挂 | ❌ 不放弃 |
+| audit 纠偏 | `exec_layer.cancel()` + `CANCEL_DONE` | ❌ 不放弃 |
 | discover 多周期无买单 | 3 次 NO_ORDER → `remove_actor()` + `stop()` | ✅ 放弃 |
 | market_resolved | actor.stop() → remove_actor() | ✅ 放弃 |
 
@@ -518,7 +496,7 @@ guardian_v7/
 ├── data/             # 日志输出目录
 │   ├── guardian.log  # 主日志
 │   ├── trades.log    # 买卖配对记录
-│   ├── cancels.log   # 撤单记录（区分 system/external）
+│   ├── cancels.log   # 撤单记录（已废弃，不再写入）
 │   └── abandons.log  # 放弃市场记录
 └── tests/            # 78 个单元测试
     ├── test_utils.py
@@ -539,7 +517,7 @@ guardian_v7/
 | `models.py` | 全局 | 类型定义 | `ActorState`, `EventType`, `OrderInfo` 等 |
 | `utils.py` | 全局 | 无副作用工具函数 | `safe_float()`, `round_to_tick()`, `retry_call()` |
 | `heartbeat.py` | Guardian | 保持订单存活 | `start()`, `stop()` |
-| `execution.py` | Guardian/Actor | 限流异步执行 | `place()`, `cancel()`, `limit_sell()`, `clear_place()`, `is_system_cancel()` |
+| `execution.py` | Guardian/Actor | 限流异步执行 | `place()`, `cancel()`, `limit_sell()`, `clear_place()` |
 | `actor.py` | Guardian | 单市场挂单逻辑 | `post()`, `stop()`, `force_stop()`, `state`, `active_id` |
 | `ws_manager.py` | Guardian | WS 连接生命周期 | `start()`, `stop()`, `start_market()`, `start_user()`, `market_send()` |
 | `ws_router.py` | Guardian | WS 消息分发 | `on_market_message()`, `on_user_message()` |
@@ -593,5 +571,5 @@ python main.py
 |------|------|
 | `data/guardian.log` | 全部运行日志（控制台同步输出） |
 | `data/trades.log` | 买卖配对：每笔买入+卖出成对记录 |
-| `data/cancels.log` | 撤单记录：系统撤单/人工撤单区分 source |
+| `data/cancels.log` | 撤单记录（已废弃） |
 | `data/abandons.log` | 放弃记录：asset_id + market title + 原因 |
