@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Guardian V7 — 主控制器
+"""Guardian V7 — 主控制器（集中式状态管理）
 
 职责：
- - 管理 AssetActor 生命周期（线程安全）
- - 定时任务：discover / poll_best_bids / audit / check_positions / cache_prune
+ - 所有市场状态集中管理（Dict[str, MarketState]，主线程直读直写，无锁）
+ - 定时任务：discover / poll_best_bids / audit / check_positions / cache_prune / cooldown / pending
  - 批量轮询 best_bid 替代 WebSocket 市场频道
  - 交易日志：记录 CONFIRMED 事件到 trade_logger
  - 启动/关闭编排（心跳先于订单，关闭时订单先于心跳）
@@ -21,7 +21,7 @@ import signal
 import threading
 import time
 from decimal import Decimal
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 from eth_account import Account
@@ -34,11 +34,10 @@ from py_clob_client_v2 import (
 )
 
 from config import Config
-from models import ActorState, EventType, ActorEvent, OrderInfo
+from models import ActorState, MarketState, OrderInfo
 from utils import safe_float, safe_decimal, round_to_tick, safe_float_from_decimal
 from heartbeat import HeartbeatManager
 from execution import ExecutionLayer
-from actor import AssetActor
 from ws_manager import WSManager
 from ws_router import WSRouter
 
@@ -83,13 +82,15 @@ class Guardian:
 
         # ── 组件初始化（按依赖顺序） ───────────────────────────────────────────
         self.heartbeat = HeartbeatManager(self.client, self.cfg, self.address, self.creds)
-        self.exec_layer = ExecutionLayer(self.client, self.cfg)
+        self.exec_layer = ExecutionLayer(self.client, self.cfg, self.address, self.creds)
         self.ws_manager = WSManager(self.cfg)
         self.ws_router = WSRouter(self)
 
-        # ── Actor 管理（P0 修复：全部通过锁保护的访问器） ──────────────────────
-        self._actors: Dict[str, AssetActor] = {}
-        self._actors_lock = threading.RLock()
+        # ── 市场状态（集中式，主线程直读直写） ─────────────────────────────────
+        self._markets: Dict[str, MarketState] = {}
+        self._file_managed_ids: Set[str] = set()
+        # pending: [(future, token_id, op_type, metadata), ...]
+        self._pending_ops: List[Tuple[Any, str, str, Dict[str, Any]]] = []
 
         # ── 交易处理 ──────────────────────────────────────────────────────────
         self._sell_lock = threading.Lock()
@@ -101,9 +102,6 @@ class Guardian:
         self._cache_lock = threading.RLock()
         self._market_info: Dict[str, dict] = {}
 
-        # ── CSV 文件管理的市场 ─────────────────────────────────────────────────
-        self._file_managed_ids: Set[str] = set()
-
         # ── 信号处理 ──────────────────────────────────────────────────────────
         signal.signal(signal.SIGINT, self._on_signal)
         signal.signal(signal.SIGTERM, self._on_signal)
@@ -114,31 +112,6 @@ class Guardian:
                     self.address, self.cfg.maker_rank, self.cfg.maker_size,
                     self.cfg.maker_cooldown, self.cfg.heartbeat_interval)
         logger.info("=" * 60)
-
-    # ── Actor 线程安全访问器（P0 修复） ───────────────────────────────────────
-    def get_actor(self, asset_id: str) -> Optional[AssetActor]:
-        with self._actors_lock:
-            return self._actors.get(asset_id)
-
-    def add_actor(self, asset_id: str, actor: AssetActor):
-        with self._actors_lock:
-            self._actors[asset_id] = actor
-
-    def remove_actor(self, asset_id: str) -> Optional[AssetActor]:
-        with self._actors_lock:
-            return self._actors.pop(asset_id, None)
-
-    def list_actors(self) -> List[AssetActor]:
-        with self._actors_lock:
-            return list(self._actors.values())
-
-    def list_actor_ids(self) -> List[str]:
-        with self._actors_lock:
-            return list(self._actors.keys())
-
-    def actor_count(self) -> int:
-        with self._actors_lock:
-            return len(self._actors)
 
     # ── 信号处理 ──────────────────────────────────────────────────────────────
     def _on_signal(self, *_):
@@ -202,79 +175,175 @@ class Guardian:
     def _chunk_list(lst: List, size: int) -> List[List]:
         return [lst[i:i + size] for i in range(0, len(lst), size)]
 
-    def _poll_best_bids(self):
-        """批量查询所有市场的 best_bid，检测变化后通知 Actor。"""
-        token_ids = self.list_actor_ids()
-        if not token_ids:
+    # ── 价格计算 ──────────────────────────────────────────────────────────────
+    def _target_price(self, token_id: str) -> Optional[Decimal]:
+        bids = self.get_order_book_bids(token_id)
+        if len(bids) < self.cfg.maker_rank:
+            return None
+        raw = bids[self.cfg.maker_rank - 1]
+        return round_to_tick(raw, self.cfg.tick_size)
+
+    # ── 冷却 ──────────────────────────────────────────────────────────────────
+    def _start_cooldown(self, ms: MarketState, duration: float):
+        ms.state = ActorState.COOLING
+        ms.state_at = time.time()
+        ms.cooldown_until = time.time() + duration
+
+    # ── 撤单动作 ──────────────────────────────────────────────────────────────
+    def _trigger_cancel(self, token_id: str, reason: str = ""):
+        ms = self._markets.get(token_id)
+        if not ms:
+            return
+        if not ms.active_id:
+            if ms.state != ActorState.COOLING:
+                ms.state = ActorState.NO_ORDER
+                ms.state_at = time.time()
+            return
+        oid = ms.active_id
+        ms.state = ActorState.CANCELING
+        ms.state_at = time.time()
+        logger.info("[STATE] %s CANCELING %s... | %s", token_id[:16], oid[:20], reason)
+        fut = self.exec_layer.cancel(oid, reason)
+        self._pending_ops.append((fut, token_id, "cancel", {"order_id": oid, "reason": reason}))
+
+    # ── 批量撤单 ──────────────────────────────────────────────────────────────
+    def _batch_cancel(self, token_ids: List[str], reason: str = ""):
+        """收集 market state 中的 active_id，批量发 DELETE /orders。"""
+        order_ids = []
+        for tid in token_ids:
+            ms = self._markets.get(tid)
+            if ms and ms.active_id and ms.state is not ActorState.CANCELING:
+                order_ids.append(ms.active_id)
+                ms.state = ActorState.CANCELING
+                ms.state_at = time.time()
+        if order_ids:
+            logger.info("[BATCH CANCEL] 批量撤单 %d 个 | %s", len(order_ids), reason)
+            fut = self.exec_layer.cancel_batch(order_ids, reason)
+            self._pending_ops.append((fut, "_batch_", "cancel_batch",
+                                      {"order_ids": order_ids, "reason": reason}))
+
+    def _handle_batch_cancel_result(self, token_ids: List[str], reason: str,
+                                      result: dict):
+        """根据批量撤单结果更新状态：成功的进入冷却，失败的回退 RESTING。"""
+        canceled_set = set(result.get("canceled", []))
+        for tid in token_ids:
+            ms = self._markets.get(tid)
+            if not ms or ms.state is not ActorState.CANCELING:
+                continue
+            if ms.active_id in canceled_set:
+                ms.active_id = None
+                ms.active_price = None
+                ms.state = ActorState.NO_ORDER
+                ms.state_at = time.time()
+                self._start_cooldown(ms, self.cfg.maker_cooldown)
+            else:
+                logger.error("[BATCH CANCEL] %s 取消失败，保持 RESTING", tid[:16])
+                ms.state = ActorState.RESTING
+                ms.state_at = time.time()
+
+    # ── 挂单动作（异步两步） ──────────────────────────────────────────────────
+    def _trigger_place(self, token_id: str):
+        """Step 1: 异步获取订单簿，避免 GET /book 阻塞主循环。"""
+        ms = self._markets.get(token_id)
+        if not ms:
+            return
+        ms.state = ActorState.PLACING
+        ms.state_at = time.time()
+        fut = self.exec_layer.run_async(self._target_price, token_id)
+        self._pending_ops.append((fut, token_id, "target_price", {}))
+
+    # ── 异步结果处理 ──────────────────────────────────────────────────────────
+    def _handle_cancel_result(self, ms: MarketState, token_id: str, ok: bool,
+                               order_id: str, reason: str):
+        if not ok:
+            if ms.active_id is None:
+                logger.warning("[CANCEL FAIL] %s 订单已不存在，忽略取消失败", order_id[:20])
+                return
+            logger.error("[CANCEL FAIL] %s 订单仍存活在交易所！保持 RESTING", order_id[:20])
+            ms.state = ActorState.RESTING
+            ms.state_at = time.time()
             return
 
-        polled = 0
-        for chunk in self._chunk_list(token_ids, 500):
-            try:
-                r = requests.post(
-                    f"{self.cfg.host}/books",
-                    json=[{"token_id": tid} for tid in chunk],
-                    timeout=10,
-                )
-                if r.status_code != 200:
-                    logger.error("[POLL] 批量查询失败 HTTP %s", r.status_code)
-                    continue
-                books = r.json()
-            except Exception as e:
-                logger.error("[POLL] 批量查询异常: %s", e)
+        logger.info("[CANCEL OK] %s... | %s", order_id[:20], reason)
+        ms.active_id = None
+        ms.active_price = None
+        if ms.state == ActorState.COOLING:
+            return
+        ms.state = ActorState.NO_ORDER
+        ms.state_at = time.time()
+        self._start_cooldown(ms, self.cfg.maker_cooldown)
+
+    def _handle_place_result(self, ms: MarketState, token_id: str, ok: bool,
+                              order_id: Optional[str], price: Decimal):
+        if ok and order_id:
+            ms.active_id = order_id
+            ms.active_price = price
+            ms.state = ActorState.RESTING
+            ms.state_at = time.time()
+            logger.info("[STATE] %s RESTING %s... price=%s", token_id[:16], order_id[:20], price)
+            self.exec_layer.clear_place(token_id, price)
+        else:
+            logger.error("[PLACE FAIL] %s price=%s", token_id[:16], price)
+            ms.active_id = None
+            ms.active_price = None
+            ms.state = ActorState.NO_ORDER
+            ms.state_at = time.time()
+            self.exec_layer.clear_place(token_id, price)
+            self._start_cooldown(ms, self.cfg.maker_cooldown)
+
+    # ── 定时检查 ──────────────────────────────────────────────────────────────
+    def _check_cooldowns(self, now: float):
+        for token_id, ms in list(self._markets.items()):
+            if ms.state == ActorState.COOLING and now >= ms.cooldown_until:
+                self._trigger_place(token_id)
+
+    def _check_pending_ops(self, now: float):
+        completed = []
+        for i, (fut, token_id, op, meta) in enumerate(self._pending_ops):
+            if not fut.done():
+                continue
+            completed.append(i)
+            ms = self._markets.get(token_id)
+            if not ms:
                 continue
 
-            for item in (books if isinstance(books, list) else []):
-                aid = item.get("asset_id", "")
-                actor = self.get_actor(aid)
-                if not actor or actor.state is ActorState.STOPPED:
-                    continue
+            try:
+                result = fut.result(timeout=0)
+            except Exception:
+                result = False if op == "cancel" else None
 
-                bids = item.get("bids", [])
-                if not bids:
-                    continue
+            if op == "cancel":
+                self._handle_cancel_result(ms, token_id, bool(result),
+                                            meta["order_id"], meta.get("reason", ""))
+            elif op == "cancel_batch":
+                if isinstance(result, dict):
+                    self._handle_batch_cancel_result(meta["order_ids"],
+                                                      meta.get("reason", ""), result)
+                else:
+                    for tid in meta["order_ids"]:
+                        ms = self._markets.get(tid)
+                        if ms and ms.state is ActorState.CANCELING:
+                            ms.state = ActorState.RESTING
+                            ms.state_at = time.time()
+            elif op == "target_price":
+                # Step 2: 拿到订单簿价格后，提交实际下单
+                target = result
+                if target is None:
+                    logger.warning("[RETRY] %s bids不足%d档，10s后重试",
+                                   token_id[:16], self.cfg.maker_rank)
+                    self._start_cooldown(ms, 10.0)
+                else:
+                    logger.info("[STATE] %s PLACING target=%s", token_id[:16], target)
+                    fut = self.exec_layer.place(token_id, target,
+                                                self.cfg.maker_size, self.cfg.tick_size)
+                    self._pending_ops.append((fut, token_id, "place", {"price": target}))
+            elif op == "place":
+                success = result is not None
+                self._handle_place_result(ms, token_id, success,
+                                           result if success else None, meta["price"])
 
-                # POST /books 实际返回升序，best_bid 在最后
-                best_bid_str = bids[-1].get("price", "")
-                best_ask_str = ""
-                asks = item.get("asks", [])
-                if asks:
-                    # POST /books 实际返回降序，best_ask 在最后
-                    best_ask_str = asks[-1].get("price", "")
-
-                if best_bid_str:
-                    actor.post(ActorEvent(EventType.BEST_BID, {
-                        "best_bid": best_bid_str,
-                        "best_ask": best_ask_str,
-                    }))
-                    polled += 1
-
-        logger.debug("[POLL] 轮询 %d 个 Actor", polled)
-
-    def positions(self) -> List[dict]:
-        try:
-            r = requests.get(
-                f"{self.cfg.data_api}/positions",
-                params={"user": self.address, "sizeThreshold": self.cfg.position_threshold},
-                timeout=10,
-            )
-            return r.json() if r.status_code == 200 else []
-        except Exception as e:
-            logger.error("查询持仓失败: %s", e)
-            return []
-
-    def onchain_balance(self, token_id: str) -> float:
-        try:
-            bal = self.client.get_balance_allowance(
-                BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
-            )
-            val = bal.get("balance")
-            if val is None:
-                return 0.0
-            return int(val) / 1_000_000
-        except Exception as e:
-            logger.error("余额查询失败: %s", e)
-            return 0.0
+        for i in reversed(completed):
+            self._pending_ops.pop(i)
 
     # ── 市场文件同步 ──────────────────────────────────────────────────────────
     def _load_market_targets(self) -> Optional[List[Tuple[str, str]]]:
@@ -302,77 +371,171 @@ class Guardian:
             return None
 
     def _sync_from_file(self):
-        """从 CSV 文件同步市场：新增则创建 Actor，移除则停止监控并取消订单。"""
+        """从 CSV 文件同步市场：新增则创建状态，移除则停止监控并取消订单。"""
         csv_path = self.cfg.market_file
         if not csv_path:
             return
         targets = self._load_market_targets()
         if targets is None:
-            return  # 文件读取失败，不改变任何状态
+            return
         csv_ids = {t[0] for t in targets}
-        current_ids = set(self.list_actor_ids())
 
         # 移除：CSV 中不再存在的 file-managed 市场
         removed = self._file_managed_ids - csv_ids
         for token_id in list(removed):
-            actor = self.get_actor(token_id)
-            if actor and actor.state is not ActorState.STOPPED:
+            ms = self._markets.get(token_id)
+            if ms and ms.active_id:
                 logger.info("[SYNC] 市场已从文件移除，停止监控 %s", token_id[:20])
-                actor.stop()
-                self.remove_actor(token_id)
-            elif actor:
-                self.remove_actor(token_id)
+                self._trigger_cancel(token_id, "从CSV移除")
+                ms.active_id = None
+                ms.active_price = None
+            self._markets.pop(token_id, None)
             self._file_managed_ids.discard(token_id)
 
         # 新增：CSV 中新出现的市场
         for token_id, title in targets:
-            if token_id not in current_ids:
+            if token_id not in self._markets:
                 logger.info("[SYNC] 新市场 %s | %s", token_id[:20], title[:50])
-                actor = AssetActor(token_id, self)
-                self.add_actor(token_id, actor)
-                # 随机 2~30s 错开冷却，避免大量市场同时查价+挂单
+                ms = MarketState()
+                self._markets[token_id] = ms
                 stagger = random.uniform(self.cfg.cooldown_delay, 30.0)
-                actor._start_cooldown(duration=stagger)
+                self._start_cooldown(ms, stagger)
             self._file_managed_ids.add(token_id)
 
     # ── 订单发现 ──────────────────────────────────────────────────────────────
     def discover(self):
         orders = self.open_orders()
         buys = {o.token_id: o for o in orders if o.side.upper() == "BUY"}
+        now = time.time()
 
-        # 清理 STOPPED 状态 Actor
-        for aid in self.list_actor_ids():
-            actor = self.get_actor(aid)
-            if actor and actor.state is ActorState.STOPPED:
-                self.remove_actor(aid)
-                actor.force_stop()
-                logger.info("[DISCOVER] 清理 STOPPED 市场 %s", aid[:20])
+        # 清理 STOPPED 状态市场
+        stopped = [tid for tid, ms in self._markets.items() if ms.state == ActorState.STOPPED]
+        for tid in stopped:
+            self._markets.pop(tid, None)
+            self._file_managed_ids.discard(tid)
+            logger.info("[DISCOVER] 清理 STOPPED 市场 %s", tid[:20])
 
         # 发现新市场（已有挂单）
-        for asset_id in set(buys.keys()) - set(self.list_actor_ids()):
-            o = buys[asset_id]
-            logger.info("[DISCOVER] 新市场 %s price=%s", asset_id[:20], o.price)
-            actor = AssetActor(asset_id, self, initial=o)
-            self.add_actor(asset_id, actor)
+        for tid in set(buys.keys()) - set(self._markets.keys()):
+            o = buys[tid]
+            logger.info("[DISCOVER] 新市场 %s price=%s", tid[:20], o.price)
+            self._markets[tid] = MarketState(
+                state=ActorState.RESTING,
+                state_at=now,
+                active_id=o.order_id,
+                active_price=safe_decimal(o.price),
+            )
 
         # 从 CSV 文件同步
         self._sync_from_file()
 
-        logger.info("[DISCOVER] 守护 %d 个市场", self.actor_count())
+        logger.info("[DISCOVER] 守护 %d 个市场", len(self._markets))
+
+    # ── 批量轮询最佳买价 ──────────────────────────────────────────────────────
+    def _poll_best_bids(self):
+        token_ids = list(self._markets.keys())
+        if not token_ids:
+            return
+
+        polled = 0
+        cancels: List[str] = []
+        for chunk in self._chunk_list(token_ids, 500):
+            try:
+                r = requests.post(
+                    f"{self.cfg.host}/books",
+                    json=[{"token_id": tid} for tid in chunk],
+                    timeout=10,
+                )
+                if r.status_code != 200:
+                    logger.error("[POLL] 批量查询失败 HTTP %s", r.status_code)
+                    continue
+                books = r.json()
+            except Exception as e:
+                logger.error("[POLL] 批量查询异常: %s", e)
+                continue
+
+            for item in (books if isinstance(books, list) else []):
+                aid = item.get("asset_id", "")
+                ms = self._markets.get(aid)
+                if not ms or ms.state is ActorState.STOPPED:
+                    continue
+
+                bids = item.get("bids", [])
+                if not bids:
+                    continue
+
+                best_bid_str = bids[-1].get("price", "")
+                best_ask_str = ""
+                asks = item.get("asks", [])
+                if asks:
+                    best_ask_str = asks[-1].get("price", "")
+
+                if not best_bid_str:
+                    continue
+
+                new_bid = safe_decimal(best_bid_str)
+                new_ask = safe_decimal(best_ask_str)
+
+                if ms.best_bid is None:
+                    ms.best_bid = new_bid
+                    ms.best_ask = new_ask
+                    logger.info("[BID INIT] %s best_bid=%s", aid[:16], new_bid)
+                    polled += 1
+                    continue
+
+                if new_bid == ms.best_bid:
+                    continue
+
+                ms.best_bid = new_bid
+                ms.best_ask = new_ask
+                logger.info("[BID] %s best_bid=%s state=%s", aid[:16], new_bid, ms.state.name)
+                polled += 1
+
+                if ms.state is ActorState.RESTING:
+                    cancels.append(aid)
+                elif ms.state is ActorState.NO_ORDER and ms.cooldown_until <= time.time():
+                    self._start_cooldown(ms, self.cfg.maker_cooldown)
+
+        if cancels:
+            self._batch_cancel(cancels, "best_bid变化")
+
+        logger.debug("[POLL] 轮询 %d 个 Actor", polled)
+
+    # ── 持仓查询 ──────────────────────────────────────────────────────────────
+    def positions(self) -> List[dict]:
+        try:
+            r = requests.get(
+                f"{self.cfg.data_api}/positions",
+                params={"user": self.address, "sizeThreshold": self.cfg.position_threshold},
+                timeout=10,
+            )
+            return r.json() if r.status_code == 200 else []
+        except Exception as e:
+            logger.error("查询持仓失败: %s", e)
+            return []
+
+    def onchain_balance(self, token_id: str) -> float:
+        try:
+            bal = self.client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+            )
+            val = bal.get("balance")
+            if val is None:
+                return 0.0
+            return int(val) / 1_000_000
+        except Exception as e:
+            logger.error("余额查询失败: %s", e)
+            return 0.0
 
     # ── 审计 ──────────────────────────────────────────────────────────────────
     def audit(self):
         logger.info("[AUDIT] 开始...")
         orders = self.open_orders()
         order_map = {o.order_id: o for o in orders}
-
-        # 将订单列表传给每个 Actor，避免每个 Actor 单独调 API
-        for a in self.list_actors():
-            a.post(ActorEvent(EventType.AUDIT, {"orders": order_map}))
-
         buys = [o for o in orders if o.side.upper() == "BUY"]
+        now = time.time()
 
-        # 批量查询 best_bid（分片，上限 500 token/次）
+        # 批量查询 best_bid
         best_bid_map: Dict[str, Decimal] = {}
         if buys:
             for chunk in self._chunk_list(list({o.token_id for o in buys}), 500):
@@ -390,27 +553,51 @@ class Guardian:
                 except Exception as e:
                     logger.error("[AUDIT] 批量查询 best_bid 失败: %s", e)
 
-        to_cancel: List[Tuple[OrderInfo, str]] = []
+        # 逐个市场审计
+        for token_id, ms in list(self._markets.items()):
+            # 卡死的 PLACING/CANCELING 状态重置
+            if ms.state in (ActorState.CANCELING, ActorState.PLACING) \
+                    and (now - ms.state_at) > self.cfg.stale_timeout:
+                logger.warning("[AUDIT] %s %s 超时重置", token_id[:16], ms.state.name)
+                self.exec_layer.clear_place_by_asset(token_id)
+                ms.active_id = None
+                ms.active_price = None
+                ms.state = ActorState.NO_ORDER
+                ms.state_at = now
+                self._start_cooldown(ms, self.cfg.maker_cooldown)
+                continue
+
+            # RESTING 状态验证订单仍存在
+            if ms.state is ActorState.RESTING and ms.active_id:
+                if ms.active_id not in order_map:
+                    logger.warning("[AUDIT] %s 订单丢失纠偏", token_id[:16])
+                    ms.active_id = None
+                    ms.active_price = None
+                    ms.state = ActorState.NO_ORDER
+                    ms.state_at = now
+                    self._start_cooldown(ms, self.cfg.maker_cooldown)
+
+            # NO_ORDER 卡死强制重挂
+            if ms.state is ActorState.NO_ORDER \
+                    and (now - ms.state_at) > self.cfg.stale_timeout:
+                logger.warning("[AUDIT] %s NO_ORDER 卡死强制重挂", token_id[:16])
+                self._start_cooldown(ms, self.cfg.maker_cooldown)
+
+        # 纠偏超价订单
+        overpriced = []
         for o in buys:
             bb = best_bid_map.get(o.token_id)
             if bb is not None:
                 o_price_dec = Decimal(str(o.price))
                 if o_price_dec >= bb:
-                    to_cancel.append((o, f"审计: price {o.price} >= best_bid {bb}"))
+                    overpriced.append(o.token_id)
 
-        for o, reason in to_cancel:
-            self.exec_layer.cancel(o.order_id, reason)
-            actor = self.get_actor(o.token_id)
-            if actor:
-                actor.post(ActorEvent(EventType.CANCEL_DONE, {
-                    "order_id": o.order_id, "ok": True, "reason": reason,
-                }))
-            time.sleep(self.cfg.cancel_delay)
-        logger.info("[AUDIT] 完成 %d 买单检查 | 纠偏 %d 个", len(buys), len(to_cancel))
+        if overpriced:
+            self._batch_cancel(overpriced, "审计纠偏")
+        logger.info("[AUDIT] 完成 %d 买单检查 | 纠偏 %d 个", len(buys), len(overpriced))
 
     # ── 交易处理 ──────────────────────────────────────────────────────────────
     def handle_trade(self, data: dict):
-        """记录 CONFIRMED trade 事件到 trade_logger，不触发卖出（卖出由 check_positions 负责）。"""
         tid = data.get("id", "")
         status = str(data.get("status", "")).upper()
         asset_id = data.get("asset_id") or data.get("token_id", "")
@@ -461,7 +648,6 @@ class Guardian:
 
     # ── 订单事件 ──────────────────────────────────────────────────────────────
     def handle_order(self, data: dict):
-        """订单事件：只记录日志，不做业务处理。"""
         otype = str(data.get("type", ""))
         oid = str(data.get("id", ""))
         logger.debug("[ORDER EVENT] type=%s id=%s", otype, oid[:20])
@@ -482,7 +668,6 @@ class Guardian:
             if not tid:
                 continue
 
-            # 已有卖单挂着 → 跳过
             if tid in sell_tokens:
                 continue
 
@@ -537,7 +722,7 @@ class Guardian:
         if placed:
             logger.info("[POSITION] 兜底限价卖单 %d 个", placed)
 
-    # ── 缓存清理（P2 修复） ────────────────────────────────────────────────────
+    # ── 缓存清理 ──────────────────────────────────────────────────────────────
     def _prune_caches(self):
         with self._cache_lock:
             if len(self._market_info) > self.cfg.cache_max_size:
@@ -610,6 +795,9 @@ class Guardian:
                 for _ in range(10):
                     if not self.running:
                         break
+                    now = time.time()
+                    self._check_cooldowns(now)
+                    self._check_pending_ops(now)
                     time.sleep(1)
             except Exception as e:
                 logger.error("主循环异常: %s", e, exc_info=True)
@@ -621,21 +809,12 @@ class Guardian:
     def _shutdown(self):
         logger.info("开始优雅关闭...")
 
-        # 批量提交所有撤单（先全部提交，再统一等待）
-        futs = []
-        for a in self.list_actors():
-            if a.active_id:
-                fut = self.exec_layer.cancel(a.active_id, "系统关闭")
-                futs.append(fut)
-        for fut in futs:
-            try:
-                fut.result(timeout=self.cfg.cancel_timeout)
-            except Exception:
-                pass
-
-        # 停止所有 Actor
-        for a in self.list_actors():
-            a.force_stop()
+        # 一次 API 调用取消所有活跃订单
+        fut = self.exec_layer.cancel_all("系统关闭")
+        try:
+            fut.result(timeout=self.cfg.cancel_timeout)
+        except Exception:
+            pass
 
         # 停止 WebSocket
         self.ws_manager.stop()

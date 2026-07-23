@@ -4,9 +4,11 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import Enum, auto
-from typing import Any, Dict
+from typing import Optional
 
 
 class ActorState(Enum):
@@ -18,20 +20,16 @@ class ActorState(Enum):
     STOPPED = auto()
 
 
-class EventType(Enum):
-    BEST_BID = auto()       # 轮询检测到 best_bid 变化
-    STOP = auto()
-    AUDIT = auto()
-    COOLDOWN_EXPIRED = auto()
-    # 内部事件：异步操作结果回传
-    CANCEL_DONE = auto()   # payload: {order_id, ok, reason}
-    PLACE_DONE = auto()    # payload: {order_id, price, ok}
-
-
 @dataclass
-class ActorEvent:
-    type: EventType
-    payload: Dict[str, Any] = field(default_factory=dict)
+class MarketState:
+    """集中式市场状态，主线程直读直写，无需锁。"""
+    state: ActorState = ActorState.NO_ORDER
+    state_at: float = field(default_factory=time.time)
+    active_id: Optional[str] = None
+    active_price: Optional[Decimal] = None
+    best_bid: Optional[Decimal] = None
+    best_ask: Optional[Decimal] = None
+    cooldown_until: float = 0.0
 
 
 @dataclass
@@ -42,7 +40,3 @@ class OrderInfo:
     side: str
     token_id: str
     market: str = ""
-
-
-
-

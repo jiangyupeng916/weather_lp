@@ -24,15 +24,14 @@ Guardian V7 是一个 **Polymarket CLOB 交易平台的 Maker-only 自动化做�
 
 ```
 config.py   ← 无内部依赖（冻结 dataclass，环境变量加载）
-models.py   ← 无内部依赖（枚举、数据类）
+models.py   ← 无内部依赖（ActorState, MarketState, OrderInfo）
 utils.py    ← 无内部依赖（纯函数工具）
     │
     ├── heartbeat.py   ← config
     ├── execution.py   ← config, models, utils
     ├── ws_manager.py  ← config
     │
-    ├── actor.py       ← config, models, utils, execution (Guardian via TYPE_CHECKING)
-    ├── ws_router.py   ← config, models (Guardian via TYPE_CHECKING)
+    ├── ws_router.py   ← config (Guardian via TYPE_CHECKING)
     │
     └── guardian.py    ← 以上全部
             │
@@ -61,20 +60,18 @@ utils.py    ← 无内部依赖（纯函数工具）
   ┌────────┼────────┐       │          │         │
   │ User WS◄────────┼───────┘          │         │
   │ trade 事件       │                  │         │
-  │ (MATCHED/       │     ┌────────────▼────┐    │
-  │  CONFIRMED/     │     │ Guardian 主控   │    │
-  │  FAILED)        │     │ discover(30s)  │    │
-  │ order 事件       │     │ poll(3s)       ├────┘
-  │ (PLACEMENT/     │     │ audit(120s)    │
-  │  CANCELLATION)  │     │ positions(120s)│
-  └─────────────────┘     │ prune(300s)    │
-                          └───────┬────────┘
-                                  │ post(ActorEvent)
-                          ┌───────▼────────┐
-                          │ AssetActor×N   │
-                          │ 串行状态机      │
-                          │ 每市场一个实例   │
-                          └────────────────┘
+  │ (MATCHED/       │     ┌────────────▼─────────▼──┐
+  │  CONFIRMED/     │     │ Guardian 主线程          │
+  │  FAILED)        │     │ discover(30s)           │
+  │ order 事件       │     │ poll(3s)               │
+  │ (PLACEMENT/     │     │ audit(120s)            │
+  │  CANCELLATION)  │     │ positions(120s)        │
+  └─────────────────┘     │ prune(300s)            │
+                          │ cooldown/pending(1s)  │
+                          │                        │
+                          │ Dict[str, MarketState]│
+                          │ (主线程直读直写，无锁)   │
+                          └────────────────────────┘
 ```
 
 ***
@@ -144,10 +141,9 @@ check_positions() 每 120s 执行：
 
 ### 3.2 models.py — 数据模型
 
-- **`ActorState`**：`NO_ORDER → PLACING → RESTING → CANCELING → COOLING → STOPPED`
-- **`EventType`**：12 种事件类型，含 2 个内部事件（`CANCEL_DONE`、`PLACE_DONE`）
-- **`OrderInfo`** / **`TradeRecord`** / **`MarketInfo`**：纯数据载体
-- **`PlaceRequest`** / **`CancelRequest`**：执行层入参
+- **`ActorState`**：`NO_ORDER → PLACING → RESTING → CANCELING → COOLING → STOPPED`，六状态枚举
+- **`MarketState`**：集中式市场状态 dataclass，字段 `state / state_at / active_id / active_price / best_bid / best_ask / cooldown_until`，主线程直读直写
+- **`OrderInfo`**：纯数据载体（order_id, price, size, side, token_id, market）
 
 ### 3.3 utils.py — 工具函数
 
@@ -200,35 +196,33 @@ check_positions() 每 120s 执行：
 | `clear_place(asset_id, price)` | 清除下单幂等 token | — |
 | `clear_place_by_asset(asset_id)` | 清除某资产全部下单 token | — |
 
-### 3.6 actor.py — 单市场状态机
+### 3.6 guardian.py 集中式状态管理（替代 actor.py）
 
-每个被守护的市场一个 `AssetActor` 实例，在独立守护线程中**串行**处理事件队列。
+**架构变更（V7.4）**：删除 `AssetActor` 线程和事件队列。所有市场状态集中在主线程的 `Dict[str, MarketState]` 中，直读直写，无需锁。
 
-**状态机**：
+**状态机**（与之前相同，但不在独立线程中）：
 
 ```
                         ┌──────────┐
                ┌───────►│ NO_ORDER │◄──────────┐
                │        └─────┬────┘           │
-               │   _target_price │             │ _start_cooldown()
-               │   有报价时自动挂单 │             │ 或 审计强制重挂
+               │    冷却到期/bid变化│           │ _start_cooldown()
                │        ┌─────▼────┐           │
                │        │ PLACING  │           │
                │        └─────┬────┘           │
-               │     PLACE_DONE │             │
+               │   Future done  │             │
                │        (ok+oid)│             │
                │        ┌─────▼────┐           │
                │        │ RESTING  ├───────────┤ best_bid 变化
-               │        └──┬───┬──┘           │ target_price 变化
-               │           │   │              │ WSS 重连
-               │  成交匹配  │   │ 撤单         │
-               │  (保持不变) │   │              │
+               │        └──┬───┬──┘           │
+               │      成交 │   │ 撤单         │
+               │   (保持不变)│   │              │
                │           │   │              │
                │        ┌──▼───▼──┐           │
                │        │CANCELING│           │
                │    ┌───┤  (异步) ├───┐       │
                │    │   └─────────┘   │       │
-               │    │ CANCEL_OK       │ CANCEL_FAIL
+               │    │ cancel OK       │ cancel FAIL
                │    ▼                 ▼       │
                │  ┌─────┐        ┌────────┐   │
                │  │STOP │        │RESTING │   │
@@ -241,24 +235,21 @@ check_positions() 每 120s 执行：
                                         └──────────┘
 ```
 
-**事件驱动设计**：
+**状态变更机制**：
 
-- `place()` / `cancel()` 返回 `Future`，回调线程将结果 `post()` 回 Actor 队列
-- `CANCEL_DONE` / `PLACE_DONE` 内部事件确保状态修改在 Actor 线程内串行执行
-- 撤单失败时保持 RESTING（订单仍存活于交易所），不清除 `active_id`
-- 成交后保持 RESTING（部分成交≠全部成交），由审计验证实际订单状态
+| 场景 | 旧（actor.py） | 新（集中式） |
+|------|---------------|-------------|
+| 挂单触发 | COOLDOWN_EXPIRED 事件→Actor 队列→_place() | `_check_cooldowns()` 每秒遍历 dict 检查到期 |
+| 异步结果回传 | 回调线程 post 到 Actor 队列 | 回调线程设置 Future 结果，`_check_pending_ops()` 每秒轮询 `Future.done()` |
+| best_bid 变化 | post BEST_BID 事件→Actor 队列 | `_poll_best_bids()` 直接读/写 MarketState |
+| 审计 | post AUDIT 事件→Actor 队列 | `audit()` 直接遍历 `_markets` 检查 |
+| 冷却等待 | 每个 Actor 独立 `threading.Timer` | `cooldown_until` 时间戳 + 主循环检查 |
 
-**数据源**：
+**关键设计决策**：
 
-挂单前通过 REST API `GET /book` 实时获取订单簿买盘数据计算目标价格，不再通过 WebSocket 维护本地订单簿副本。WebSocket 仅用于接收 `best_bid_ask` 事件作为撤单触发器。
-
-**关键行为**：
-
-| 场景 | 行为 |
-|------|------|
-| best_bid 首次接收到 | 仅记录，不触发动作 |
-| best_bid 变化 + RESTING | 撤单重挂 |
-| best_bid 变化 + NO_ORDER | 启动冷却 |
+- 异步结果回传不依赖回调线程改状态，回调线程只 `set_result()`，主线程轮询 `Future.done()` 后改状态
+- 取消/下单的幂等保护由 ExecutionLayer 提供（不变）
+- `_pending_ops` 列表追踪进行中的异步操作
 
 ### 3.7 ws_manager.py + ws_router.py — WebSocket 层
 
@@ -338,35 +329,34 @@ Guardian 每 3s 通过 `POST /books` 批量查询所有市场的订单簿，提�
 
 | 线程 | 数量 | 持久性 | 用途 |
 |------|------|--------|------|
-| MainThread | 1 | 持久 | 主循环 |
+| MainThread | 1 | 持久 | 主循环 + 所有市场状态管理 |
 | heartbeat | 1 | 持久 | REST 心跳 |
-| ws-market | 1 | 持久 | 市场 WS（单线程重连） |
 | ws-user | 1 | 持久 | 用户 WS（单线程重连） |
-| ws-ping | 2 | 持久 | market/user 频道 PING |
-| Actor-* | N | 持久 | 每市场一个事件循环 |
+| ws-ping | 1 | 持久 | 用户频道 PING |
 | exec-N | ≤10 | 持久 | ThreadPoolExecutor 工作线程 |
-| 回调线程 | 短期 | M | place/cancel Future 结果回传 |
+
+**V7.4 变更**：删除 Actor-×N 线程（每市场一个）和回调线程。异步结果由 `_check_pending_ops()` 在主循环中轮询 `Future.done()` 完成回传。
 
 ### 4.2 锁层级（防死锁）
 
 ```
 获取顺序（严格单向）：
 
-1. _actors_lock        (Guardian RLock)     — 最外层
-2. _trade_lock         (Guardian Lock)
-3. _cache_lock         (Guardian RLock)     — 缓存读写
-4. _sell_lock          (Guardian Lock)      — 最内层
+1. _trade_lock         (Lock)     — 已处理 trade ID 去重
+2. _cache_lock         (RLock)    — 缓存读写
+3. _sell_lock          (Lock)     — 卖出并发保护
 
-+ _state_lock          (每个 Actor RLock)  — 独立，不与上述交叉
-+ ExecutionLayer 内部锁                     — 独立，不与上述交叉
++ ExecutionLayer 内部锁               — 独立，不与上述交叉
 ```
+
+**V7.4 变更**：删除 `_actors_lock`（不再有 Actor 管理）和 `_state_lock`（状态全在主线程）。
 
 ### 4.3 线程安全关键设计
 
-- **Actor 事件队列**：`CANCEL_DONE`/`PLACE_DONE` 通过 `post()` 投递，保证状态修改在 Actor 线程内执行
-- **Actor 生命周期**：`post()` 检查 `_running`，阻止向已停止的 Actor 投递事件
-- **WS 重连互斥**：`_market_lock`/`_user_lock` 保证同频道只有一个连接线程
-- **Actor 管理**：`get_actor()/add_actor()/remove_actor()` 全部加锁保护
+- **MarketState**：主线程独占读写，无需锁。所有状态变更在 1s 粒度内完成。
+- **异步回传**：Future 在线程池线程设置结果，主线程在 `_check_pending_ops()` 中轮询 `done()` 后更新 MarketState
+- **WS 重连互斥**：`_user_lock` 保证用户频道只有一个连接线程
+- **执行层隔离**：ExecutionLayer 内部锁（rate limiter、幂等 token）独立，不与 Guardian 锁交叉
 
 ***
 
@@ -430,6 +420,17 @@ WS CANCELLATION 事件不再处理（仅记录 debug 日志）。撤单完全由
 - 删除 `exec_layer.submit()`（无调用方）
 - Actor 移除 `_on_trade_matched` 处理器
 
+### V7.4（2026-07-23）：集中式状态管理 — 删除 Actor 线程
+
+- 删除 `actor.py`：不再每市场一个线程 + 事件队列 + Timer
+- 所有市场状态集中到主线程 `Dict[str, MarketState]`，直读直写，无锁
+- `_check_cooldowns()` 每秒遍历冷却到期检查（替代各 Actor 独立 Timer）
+- `_check_pending_ops()` 每秒轮询 `Future.done()`（替代回调线程 post 事件）
+- `_poll_best_bids()` / `audit()` 直接读写 MarketState（替代 post BEST_BID/AUDIT 事件）
+- 线程数：400+ 市场 → 固定 ~14 线程（无市场数量相关线程）
+- CSV 同步支持市场移除（`_file_managed_ids` 追踪）
+- 关闭撤单批量提交（先全部提交，再统一等待）
+
 ### V7.3（2026-07-23）：best_bid 修复 + audit 优化 + 文档清理
 
 - 修复 `POST /books` best_bid 取反：API 文档声称 bids 降序，实际返回升序，`bids[0]` 取到最低价，改为 `bids[-1]`；asks 同理改为 `asks[-1]`
@@ -466,12 +467,11 @@ WS CANCELLATION 事件不再处理（仅记录 debug 日志）。撤单完全由
 guardian_v7/
 ├── main.py           # 入口：日志初始化 → 配置加载 → Guardian.run()
 ├── config.py         # 配置：冻结 dataclass，从 .env 加载全部参数，validate() 校验必填
-├── models.py         # 模型：ActorState(6状态)、EventType(13事件)、OrderInfo、TradeRecord 等
+├── models.py         # 模型：ActorState(6状态)、MarketState(dataclass)、OrderInfo
 ├── utils.py          # 工具：safe_float/safe_decimal 安全转换、round_to_tick 价格对齐、retry_call 重试
 ├── heartbeat.py      # 心跳：HeartbeatManager 守护线程，SDK→raw REST 双重保障，heartbeat_id 链式恢复
 ├── execution.py      # 执行层：全局限流 + 幂等令牌 + ThreadPoolExecutor，place/cancel/limit_sell
-├── actor.py          # Actor：单市场串行状态机，事件队列驱动，异步回调 → 内部事件回传
-├── ws_manager.py     # WS 管理：市场/用户双频道，单线程重连，代理支持，PING 保活
+├── ws_manager.py     # WS 管理：用户频道，单线程重连，代理支持，PING 保活
 ├── ws_router.py      # WS 路由：JSON 解析 → Guardian 分发，initial_dump 完整处理
 ├── guardian.py       # 主控：定时循环 + 多周期放弃 + trade 日志 + check_positions 卖出 + 线程安全管理
 ├── LOGIC.md          # 策略逻辑文档（详细行为描述）
@@ -500,10 +500,9 @@ guardian_v7/
 | `utils.py` | 全局 | 无副作用工具函数 | `safe_float()`, `round_to_tick()`, `retry_call()` |
 | `heartbeat.py` | Guardian | 保持订单存活 | `start()`, `stop()` |
 | `execution.py` | Guardian/Actor | 限流异步执行 | `place()`, `cancel()`, `limit_sell()`, `clear_place()` |
-| `actor.py` | Guardian | 单市场挂单逻辑 | `post()`, `stop()`, `force_stop()`, `state`, `active_id` |
 | `ws_manager.py` | Guardian | WS 连接生命周期 | `start()`, `stop()`, `start_user()` |
 | `ws_router.py` | Guardian | WS 消息分发（仅用户频道） | `on_user_message()` |
-| `guardian.py` | main.py | 全盘协调 | `run()`, `handle_trade()`, `handle_order()`, `discover()` |
+| `guardian.py` | main.py | 全盘协调 + 集中式状态管理 | `run()`, `handle_trade()`, `handle_order()`, `discover()` |
 
 ***
 
@@ -541,11 +540,10 @@ python main.py
 
 `Ctrl+C` → 优雅关闭序列：
 
-1. 取消所有活跃订单
-2. 停止所有 Actor（`force_stop()`）
-3. 断开 WebSocket 连接
-4. 关闭线程池（`shutdown(wait=True)`）
-5. 停止心跳
+1. 批量提交所有撤单 → 统一等待完成
+2. 断开 WebSocket 连接
+3. 关闭线程池（`shutdown(wait=True)`）
+4. 停止心跳
 
 ### 日志文件
 
