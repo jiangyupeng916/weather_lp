@@ -248,11 +248,13 @@ class Guardian:
             if not bids:
                 continue
 
-            best_bid_str = bids[0].get("price", "")
+            # POST /books 实际返回升序，best_bid 在最后
+            best_bid_str = bids[-1].get("price", "")
             best_ask_str = ""
             asks = item.get("asks", [])
             if asks:
-                best_ask_str = asks[0].get("price", "")
+                # POST /books 实际返回降序，best_ask 在最后
+                best_ask_str = asks[-1].get("price", "")
 
             if best_bid_str:
                 actor.post(ActorEvent(EventType.BEST_BID, {
