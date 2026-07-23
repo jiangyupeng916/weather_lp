@@ -42,9 +42,19 @@ Guardian 是一个 **纯 Maker（挂单方）** 自动化做市机器人，运�
 
 订单簿的最小价格变动单位是 `tick_size`（默认 0.01）。挂单前，目标价格会四舍五入对齐到 tick_size 的倍数，确保 API 接受订单。
 
-### 2.4 首次发现市场
+### 2.4 市场来源
 
-机器人每 30 秒执行一次 `discover()`，查询当前所有未成交订单。如果发现新的买单（订单簿中有买单但还没有对应的 Actor 在管理），则为该市场创建一个 Actor 并接管管理。
+机器人通过两种方式获取需要挂单的市场：
+
+**方式一：CSV 文件同步（主动）**
+
+配置 `MARKET_FILE` 指向 screener 输出的 CSV 文件，Guardian 每 30s 读取文件，为 YES 和 NO 两个 token 各自创建 Actor 并自动启动挂单周期。这是主要市场来源。
+
+**方式二：已有订单接管（被动）**
+
+每 30s 执行 `discover()` 扫描已有买单，发现未被管理的订单时创建 Actor 接管。用于重启后恢复之前已在交易所挂着的订单。
+
+两种方式并行，token_id 自动去重。
 
 ---
 
@@ -223,7 +233,7 @@ Polymarket 要求通过 REST API 每约 10 秒发送一次心跳（`POST /v1/hea
 
 | 任务 | 间隔 | 职责 |
 |------|------|------|
-| discover() | 30s | 发现新订单创建 Actor；清理 STOPPED 状态 Actor |
+| discover() | 30s | 从订单接管 + CSV 文件同步新市场；清理 STOPPED 状态 Actor |
 | _poll_best_bids() | 3s | 批量查询 `POST /books`，检测 best_bid 变化推送给 Actor |
 | audit() | 120s | 批量 `POST /books` 查 best_bid，纠偏超价订单；检测订单丢失；状态卡死重置 |
 | check_positions() | 120s | 扫描持仓 → 补挂限价卖单（唯一卖出路径） |
@@ -304,11 +314,10 @@ Polymarket 要求通过 REST API 每约 10 秒发送一次心跳（`POST /v1/hea
 
 ```
 1. heartbeat.start()          — 心跳最先，在发现任何订单之前
-2. ws_manager.start()          — 启动 WS 管理器
+2. ws_manager.start()          — 启动 WS 用户频道
 3. 用户频道认证 + 订阅          — 获取 trade/order 事件
-4. discover()                  — 发现已有买单，创建 Actor
-5. 市场频道订阅                 — 订阅各市场订单簿数据
-6. 主循环                      — 四定时任务轮转
+4. discover()                  — 接管已有买单 + CSV 文件同步新市场
+5. 主循环                      — 五定时任务轮转
 ```
 
 ---
