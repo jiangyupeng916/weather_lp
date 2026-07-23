@@ -33,7 +33,7 @@ from py_clob_client_v2 import (
 
 from config import Config
 from models import ActorState, EventType, ActorEvent, OrderInfo
-from utils import safe_float, safe_decimal, retry_call, round_to_tick, safe_float_from_decimal
+from utils import safe_float, safe_decimal, round_to_tick, safe_float_from_decimal
 from heartbeat import HeartbeatManager
 from execution import ExecutionLayer
 from actor import AssetActor
@@ -97,7 +97,6 @@ class Guardian:
 
         # ── 缓存 ──────────────────────────────────────────────────────────────
         self._cache_lock = threading.RLock()
-        self._ob_cache: Dict[str, Tuple[float, float]] = {}
         self._market_info: Dict[str, dict] = {}
 
         # ── 信号处理 ──────────────────────────────────────────────────────────
@@ -176,29 +175,6 @@ class Guardian:
         with self._cache_lock:
             self._market_info[asset_id] = info
         return info
-
-    def best_bid(self, token_id: str) -> Optional[float]:
-        def _fetch():
-            ob = self.client.get_order_book(token_id)
-            bids = ob.get("bids", []) if ob else []
-            prices = [safe_float(b.get("price", 0)) for b in bids]
-            prices = [p for p in prices if p > 0]
-            return max(prices) if prices else None
-
-        with self._cache_lock:
-            if self.cfg.cache_ttl > 0 and token_id in self._ob_cache:
-                t, v = self._ob_cache[token_id]
-                if time.time() - t < self.cfg.cache_ttl:
-                    return v
-        try:
-            val = retry_call(_fetch, retries=3, delay=1.0)
-            if val is not None:
-                with self._cache_lock:
-                    self._ob_cache[token_id] = (time.time(), val)
-            return val
-        except Exception as e:
-            logger.error("best_bid 失败: %s... | %s", token_id[:20], e)
-            return None
 
     def get_order_book_bids(self, token_id: str) -> List[Decimal]:
         """通过 REST API 获取买盘价格列表，从高到低排序。"""
@@ -324,13 +300,30 @@ class Guardian:
 
         buys = [o for o in orders if o.side.upper() == "BUY"]
 
+        # 批量查询 best_bid，替代逐个 GET /book
+        best_bid_map: Dict[str, Decimal] = {}
+        if buys:
+            token_ids = list({o.token_id for o in buys})
+            try:
+                r = requests.post(
+                    f"{self.cfg.host}/books",
+                    json=[{"token_id": tid} for tid in token_ids],
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    for item in r.json():
+                        bids = item.get("bids", [])
+                        if bids:
+                            best_bid_map[item["asset_id"]] = Decimal(bids[-1].get("price", "0"))
+            except Exception as e:
+                logger.error("[AUDIT] 批量查询 best_bid 失败: %s", e)
+
         to_cancel: List[Tuple[OrderInfo, str]] = []
         for o in buys:
-            bb = self.best_bid(o.token_id)
+            bb = best_bid_map.get(o.token_id)
             if bb is not None:
-                bb_dec = Decimal(str(bb))
                 o_price_dec = Decimal(str(o.price))
-                if o_price_dec >= bb_dec:
+                if o_price_dec >= bb:
                     to_cancel.append((o, f"审计: price {o.price} >= best_bid {bb}"))
 
         for o, reason in to_cancel:
@@ -341,7 +334,7 @@ class Guardian:
                     "order_id": o.order_id, "ok": True, "reason": reason,
                 }))
             time.sleep(self.cfg.cancel_delay)
-        logger.info("[AUDIT] 完成 | 纠偏 %d 个", len(to_cancel))
+        logger.info("[AUDIT] 完成 %d 买单检查 | 纠偏 %d 个", len(buys), len(to_cancel))
 
     # ── 交易处理 ──────────────────────────────────────────────────────────────
     def handle_trade(self, data: dict):
@@ -474,16 +467,7 @@ class Guardian:
 
     # ── 缓存清理（P2 修复） ────────────────────────────────────────────────────
     def _prune_caches(self):
-        now = time.time()
-        max_age = max(self.cfg.cache_ttl * 2, 60.0)
-
         with self._cache_lock:
-            stale = [k for k, (t, _) in self._ob_cache.items() if now - t > max_age]
-            for k in stale:
-                self._ob_cache.pop(k, None)
-            if stale:
-                logger.debug("[CACHE] 清理 _ob_cache %d 条", len(stale))
-
             if len(self._market_info) > self.cfg.cache_max_size:
                 keys = list(self._market_info.keys())
                 for k in keys[:len(keys) - self.cfg.cache_max_size // 2]:
