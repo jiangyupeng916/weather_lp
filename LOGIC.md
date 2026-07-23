@@ -91,7 +91,7 @@ best_bid（第 1 档买价）发生变化或 WS 重连。
 
 ### 审计纠偏
 
-`audit()` 每 120s 检测超价订单（price >= best_bid），发现后通过执行层直接撤单并通知 Actor 进入冷却重挂。
+`audit()` 每 120s 通过 `POST /books` 批量查询所有买单的 best_bid，与挂单价比对。若 `price >= best_bid`（超价），通过执行层直接撤单并通知 Actor 进入冷却重挂。
 
 ### 不再处理的情况
 
@@ -225,7 +225,7 @@ Polymarket 要求通过 REST API 每约 10 秒发送一次心跳（`POST /v1/hea
 |------|------|------|
 | discover() | 30s | 发现新订单创建 Actor；清理 STOPPED 状态 Actor |
 | _poll_best_bids() | 3s | 批量查询 `POST /books`，检测 best_bid 变化推送给 Actor |
-| audit() | 120s | 纠偏超价订单；检测订单丢失；状态卡死重置 |
+| audit() | 120s | 批量 `POST /books` 查 best_bid，纠偏超价订单；检测订单丢失；状态卡死重置 |
 | check_positions() | 120s | 扫描持仓 → 补挂限价卖单（唯一卖出路径） |
 | _prune_caches() | 300s | 清理过期缓存，防止内存泄漏 |
 

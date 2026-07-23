@@ -288,7 +288,7 @@ Guardian 每 3s 通过 `POST /books` 批量查询所有市场的订单簿，提�
 | 任务 | 间隔 | 功能 |
 |------|------|------|
 | `discover()` | 30s | 发现新订单创建 Actor、清理 STOPPED 状态 Actor |
-| `audit()` | 120s | 纠偏超价订单（price ≥ best_bid 即撤单）、检测订单丢失、状态卡死重置 |
+| `audit()` | 120s | 批量 `POST /books` 查 best_bid，纠偏超价订单（price ≥ best_bid 即撤单）、检测订单丢失、状态卡死重置 |
 | `check_positions()` | 120s | **唯一卖出路径**：查持仓 → 已有卖单跳过 → 无卖单补挂限价卖单 |
 | `_prune_caches()` | 300s | 清理过期 `_ob_cache`、`_market_info`、`_processed_trades`（按时间戳有序淘汰） |
 
@@ -429,9 +429,11 @@ WS CANCELLATION 事件不再处理（仅记录 debug 日志）。撤单完全由
 - 删除 `exec_layer.submit()`（无调用方）
 - Actor 移除 `_on_trade_matched` 处理器
 
-### V7.3（2026-07-23）：best_bid 排序修复 + 文档清理
+### V7.3（2026-07-23）：best_bid 修复 + audit 优化 + 文档清理
 
 - 修复 `POST /books` best_bid 取反：API 文档声称 bids 降序，实际返回升序，`bids[0]` 取到最低价，改为 `bids[-1]`；asks 同理改为 `asks[-1]`
+- audit 优化：best_bid 检查从逐个 `GET /book` 改为一次 `POST /books` 批量查询
+- 删除已无调用者的 `best_bid()` 方法、`_ob_cache` 缓存及 `retry_call` 导入
 - LOGIC.md 删除已废弃的市场放弃逻辑章节、`data/abandons.log` 条目
 
 ### 历史修复（V7.0 之前）
