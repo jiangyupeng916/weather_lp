@@ -6,7 +6,6 @@
 关键改进：
  - 非阻塞执行：place/cancel 通过 ExecutionLayer 异步执行
  - 撤单失败保护：取消失败时保持 RESTING 状态，不清除 active_id
- - 部分成交由审计发现实际状态（不再通过 EventType.TRADE_MATCHED 处理）
  - tick_size 对齐：_target_price 返回 tick_size 对齐的价格
 """
 
@@ -16,7 +15,6 @@ import logging
 import queue
 import threading
 import time
-from concurrent.futures import Future
 from decimal import Decimal
 from typing import TYPE_CHECKING, Dict, Optional
 
@@ -120,7 +118,6 @@ class AssetActor:
             EventType.STOP: self._on_stop,
             EventType.AUDIT: self._on_audit,
             EventType.COOLDOWN_EXPIRED: self._on_cooldown_expired,
-            EventType.ORDER_PLACED: self._on_order_placed,
             EventType.CANCEL_DONE: self._on_cancel_done,
             EventType.PLACE_DONE: self._on_place_done,
         }
@@ -251,21 +248,6 @@ class AssetActor:
             return
         self._place(target)
 
-    def _on_order_placed(self, p: dict):
-        oid = p.get("order_id", "")
-        price = safe_decimal(p.get("price"))
-        if not oid or self.state is not ActorState.PLACING:
-            return
-        if self.active_id == oid:
-            self._to(ActorState.RESTING, f"WSS下单确认 {oid[:20]}")
-            if price is not None:
-                self.guardian.exec_layer.clear_place(self.asset_id, price)
-            return
-        self.active_id = oid
-        self.active_price = price
-        self._to(ActorState.RESTING, f"下单确认 {oid[:20]}")
-        if price is not None:
-            self.guardian.exec_layer.clear_place(self.asset_id, price)
     # ── 动作 ──────────────────────────────────────────────────────────────────
     def _cancel(self, reason: str = ""):
         if not self.active_id:
@@ -294,7 +276,7 @@ class AssetActor:
 
         if not ok:
             if self.active_id is None:
-                # active_id 已被外部撤单清除，订单已不存在，忽略取消失败
+                # active_id 已被 audit 清除，订单已不存在，忽略取消失败
                 logger.warning("[CANCEL FAIL] %s 订单已不存在，忽略取消失败", oid[:20])
                 return
             logger.error("[CANCEL FAIL] %s 订单仍存活在交易所！保持 RESTING", oid[:20])

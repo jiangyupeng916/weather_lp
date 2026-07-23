@@ -5,9 +5,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from decimal import Decimal
 from enum import Enum, auto
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 
 class ActorState(Enum):
@@ -24,12 +23,10 @@ class EventType(Enum):
     PRICE_CHANGE = auto()
     BEST_BID = auto()
     TICK_SIZE = auto()
-    TRADE_MATCHED = auto()
     RECONNECT = auto()
     STOP = auto()
     AUDIT = auto()
     COOLDOWN_EXPIRED = auto()
-    ORDER_PLACED = auto()
     # 内部事件：异步操作结果回传
     CANCEL_DONE = auto()   # payload: {order_id, ok, reason}
     PLACE_DONE = auto()    # payload: {order_id, price, ok}
@@ -51,33 +48,5 @@ class OrderInfo:
     market: str = ""
 
 
-@dataclass
-class TradeRecord:
-    trade_id: str
-    asset_id: str
-    fill_size: float
-    price: float
-    outcome: str
-    timestamp: float = 0.0
 
 
-@dataclass
-class MarketInfo:
-    title: str = "未知"
-    outcome: str = ""
-    tick_size: Optional[str] = None
-    neg_risk: Optional[bool] = None
-
-
-@dataclass
-class PlaceRequest:
-    asset_id: str
-    price: Decimal
-    size: Decimal
-    tick_size: Decimal
-
-
-@dataclass
-class CancelRequest:
-    order_id: str
-    reason: str = ""

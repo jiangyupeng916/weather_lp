@@ -5,8 +5,7 @@
 职责：
  - 管理 AssetActor 生命周期（线程安全）
  - 定时任务：discover / audit / check_positions / cache_prune
- - 交易处理：MATCHED → CONFIRMED → 卖出
- - 订单事件处理：撤单 / 人工撤单检测 / 放弃
+ - 交易日志：记录 CONFIRMED 事件到 trade_logger
  - 启动/关闭编排（心跳先于订单，关闭时订单先于心跳）
 """
 
@@ -18,8 +17,6 @@ import os
 import signal
 import threading
 import time
-from dataclasses import dataclass
-from datetime import datetime
 from decimal import Decimal
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -31,11 +28,10 @@ from py_clob_client_v2 import (
     OpenOrderParams,
     BalanceAllowanceParams,
     AssetType,
-    PartialCreateOrderOptions,
 )
 
 from config import Config
-from models import ActorState, EventType, ActorEvent, OrderInfo, MarketInfo
+from models import ActorState, EventType, ActorEvent, OrderInfo
 from utils import safe_float, safe_decimal, retry_call, round_to_tick, safe_float_from_decimal
 from heartbeat import HeartbeatManager
 from execution import ExecutionLayer

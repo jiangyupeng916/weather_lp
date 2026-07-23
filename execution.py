@@ -26,7 +26,6 @@ from py_clob_client_v2 import (
 )
 
 from config import Config
-from models import PlaceRequest, CancelRequest
 from utils import safe_float_from_decimal, round_to_tick
 
 logger = logging.getLogger("guardian.exec")
