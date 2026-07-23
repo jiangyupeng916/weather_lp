@@ -275,12 +275,14 @@ class Guardian:
             return []
         try:
             with open(csv_path, newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
+                r = csv.reader(f)
+                headers = [h.strip() for h in next(r)]
                 targets = []
-                for row in reader:
-                    yes_id = (row.get("yes_token_id") or "").strip()
-                    no_id = (row.get("no_token_id") or "").strip()
-                    title = (row.get("Market") or "").strip()
+                for row in r:
+                    d = {headers[i]: row[i].strip() for i in range(min(len(headers), len(row)))}
+                    yes_id = d.get("yes_token_id", "")
+                    no_id = d.get("no_token_id", "")
+                    title = d.get("Market", "")
                     if yes_id:
                         targets.append((yes_id, f"{title} [YES]" if title else ""))
                     if no_id:
