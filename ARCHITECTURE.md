@@ -429,6 +429,11 @@ WS CANCELLATION 事件不再处理（仅记录 debug 日志）。撤单完全由
 - 删除 `exec_layer.submit()`（无调用方）
 - Actor 移除 `_on_trade_matched` 处理器
 
+### V7.3（2026-07-23）：best_bid 排序修复 + 文档清理
+
+- 修复 `POST /books` best_bid 取反：API 文档声称 bids 降序，实际返回升序，`bids[0]` 取到最低价，改为 `bids[-1]`；asks 同理改为 `asks[-1]`
+- LOGIC.md 删除已废弃的市场放弃逻辑章节、`data/abandons.log` 条目
+
 ### 历史修复（V7.0 之前）
 
 | 级别 | 问题 | 修复 |
