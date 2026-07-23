@@ -16,6 +16,7 @@ import csv
 import json
 import logging
 import os
+import random
 import signal
 import threading
 import time
@@ -194,51 +195,56 @@ class Guardian:
             logger.error("获取订单簿失败: %s... | %s", token_id[:20], e)
             return []
 
+    @staticmethod
+    def _chunk_list(lst: List, size: int) -> List[List]:
+        return [lst[i:i + size] for i in range(0, len(lst), size)]
+
     def _poll_best_bids(self):
         """批量查询所有市场的 best_bid，检测变化后通知 Actor。"""
         token_ids = self.list_actor_ids()
         if not token_ids:
             return
 
-        try:
-            r = requests.post(
-                f"{self.cfg.host}/books",
-                json=[{"token_id": tid} for tid in token_ids],
-                timeout=10,
-            )
-            if r.status_code != 200:
-                logger.error("[POLL] 批量查询失败 HTTP %s", r.status_code)
-                return
-            books = r.json()
-        except Exception as e:
-            logger.error("[POLL] 批量查询异常: %s", e)
-            return
-
         polled = 0
-        for item in (books if isinstance(books, list) else []):
-            aid = item.get("asset_id", "")
-            actor = self.get_actor(aid)
-            if not actor or actor.state is ActorState.STOPPED:
+        for chunk in self._chunk_list(token_ids, 500):
+            try:
+                r = requests.post(
+                    f"{self.cfg.host}/books",
+                    json=[{"token_id": tid} for tid in chunk],
+                    timeout=10,
+                )
+                if r.status_code != 200:
+                    logger.error("[POLL] 批量查询失败 HTTP %s", r.status_code)
+                    continue
+                books = r.json()
+            except Exception as e:
+                logger.error("[POLL] 批量查询异常: %s", e)
                 continue
 
-            bids = item.get("bids", [])
-            if not bids:
-                continue
+            for item in (books if isinstance(books, list) else []):
+                aid = item.get("asset_id", "")
+                actor = self.get_actor(aid)
+                if not actor or actor.state is ActorState.STOPPED:
+                    continue
 
-            # POST /books 实际返回升序，best_bid 在最后
-            best_bid_str = bids[-1].get("price", "")
-            best_ask_str = ""
-            asks = item.get("asks", [])
-            if asks:
-                # POST /books 实际返回降序，best_ask 在最后
-                best_ask_str = asks[-1].get("price", "")
+                bids = item.get("bids", [])
+                if not bids:
+                    continue
 
-            if best_bid_str:
-                actor.post(ActorEvent(EventType.BEST_BID, {
-                    "best_bid": best_bid_str,
-                    "best_ask": best_ask_str,
-                }))
-                polled += 1
+                # POST /books 实际返回升序，best_bid 在最后
+                best_bid_str = bids[-1].get("price", "")
+                best_ask_str = ""
+                asks = item.get("asks", [])
+                if asks:
+                    # POST /books 实际返回降序，best_ask 在最后
+                    best_ask_str = asks[-1].get("price", "")
+
+                if best_bid_str:
+                    actor.post(ActorEvent(EventType.BEST_BID, {
+                        "best_bid": best_bid_str,
+                        "best_ask": best_ask_str,
+                    }))
+                    polled += 1
 
         logger.debug("[POLL] 轮询 %d 个 Actor", polled)
 
@@ -303,8 +309,9 @@ class Guardian:
                 logger.info("[SYNC] 新市场 %s | %s", token_id[:20], title[:50])
                 actor = AssetActor(token_id, self)
                 self.add_actor(token_id, actor)
-                # 立即启动短冷却，冷却到期后查价挂单
-                actor._start_cooldown(duration=self.cfg.cooldown_delay)
+                # 随机 2~30s 错开冷却，避免大量市场同时查价+挂单
+                stagger = random.uniform(self.cfg.cooldown_delay, 30.0)
+                actor._start_cooldown(duration=stagger)
 
     # ── 订单发现 ──────────────────────────────────────────────────────────────
     def discover(self):
@@ -343,23 +350,23 @@ class Guardian:
 
         buys = [o for o in orders if o.side.upper() == "BUY"]
 
-        # 批量查询 best_bid，替代逐个 GET /book
+        # 批量查询 best_bid（分片，上限 500 token/次）
         best_bid_map: Dict[str, Decimal] = {}
         if buys:
-            token_ids = list({o.token_id for o in buys})
-            try:
-                r = requests.post(
-                    f"{self.cfg.host}/books",
-                    json=[{"token_id": tid} for tid in token_ids],
-                    timeout=10,
-                )
-                if r.status_code == 200:
-                    for item in r.json():
-                        bids = item.get("bids", [])
-                        if bids:
-                            best_bid_map[item["asset_id"]] = Decimal(bids[-1].get("price", "0"))
-            except Exception as e:
-                logger.error("[AUDIT] 批量查询 best_bid 失败: %s", e)
+            for chunk in self._chunk_list(list({o.token_id for o in buys}), 500):
+                try:
+                    r = requests.post(
+                        f"{self.cfg.host}/books",
+                        json=[{"token_id": tid} for tid in chunk],
+                        timeout=10,
+                    )
+                    if r.status_code == 200:
+                        for item in r.json():
+                            bids = item.get("bids", [])
+                            if bids:
+                                best_bid_map[item["asset_id"]] = Decimal(bids[-1].get("price", "0"))
+                except Exception as e:
+                    logger.error("[AUDIT] 批量查询 best_bid 失败: %s", e)
 
         to_cancel: List[Tuple[OrderInfo, str]] = []
         for o in buys:
