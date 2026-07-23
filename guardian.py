@@ -101,6 +101,9 @@ class Guardian:
         self._cache_lock = threading.RLock()
         self._market_info: Dict[str, dict] = {}
 
+        # ── CSV 文件管理的市场 ─────────────────────────────────────────────────
+        self._file_managed_ids: Set[str] = set()
+
         # ── 信号处理 ──────────────────────────────────────────────────────────
         signal.signal(signal.SIGINT, self._on_signal)
         signal.signal(signal.SIGTERM, self._on_signal)
@@ -274,11 +277,11 @@ class Guardian:
             return 0.0
 
     # ── 市场文件同步 ──────────────────────────────────────────────────────────
-    def _load_market_targets(self) -> List[Tuple[str, str]]:
-        """读取市场筛选 CSV 文件，返回 [(token_id, title), ...] 列表。"""
+    def _load_market_targets(self) -> Optional[List[Tuple[str, str]]]:
+        """读取市场筛选 CSV 文件，返回 [(token_id, title), ...] 或 None（出错时）。"""
         csv_path = self.cfg.market_file
         if not csv_path:
-            return []
+            return None
         try:
             with open(csv_path, newline="", encoding="utf-8") as f:
                 r = csv.reader(f)
@@ -296,14 +299,32 @@ class Guardian:
                 return targets
         except Exception as e:
             logger.error("[SYNC] 读取市场文件失败: %s", e)
-            return []
+            return None
 
     def _sync_from_file(self):
-        """从 CSV 文件同步市场，为新 token_id 创建 Actor 并启动挂单周期。"""
-        targets = self._load_market_targets()
-        if not targets:
+        """从 CSV 文件同步市场：新增则创建 Actor，移除则停止监控并取消订单。"""
+        csv_path = self.cfg.market_file
+        if not csv_path:
             return
+        targets = self._load_market_targets()
+        if targets is None:
+            return  # 文件读取失败，不改变任何状态
+        csv_ids = {t[0] for t in targets}
         current_ids = set(self.list_actor_ids())
+
+        # 移除：CSV 中不再存在的 file-managed 市场
+        removed = self._file_managed_ids - csv_ids
+        for token_id in list(removed):
+            actor = self.get_actor(token_id)
+            if actor and actor.state is not ActorState.STOPPED:
+                logger.info("[SYNC] 市场已从文件移除，停止监控 %s", token_id[:20])
+                actor.stop()
+                self.remove_actor(token_id)
+            elif actor:
+                self.remove_actor(token_id)
+            self._file_managed_ids.discard(token_id)
+
+        # 新增：CSV 中新出现的市场
         for token_id, title in targets:
             if token_id not in current_ids:
                 logger.info("[SYNC] 新市场 %s | %s", token_id[:20], title[:50])
@@ -312,6 +333,7 @@ class Guardian:
                 # 随机 2~30s 错开冷却，避免大量市场同时查价+挂单
                 stagger = random.uniform(self.cfg.cooldown_delay, 30.0)
                 actor._start_cooldown(duration=stagger)
+            self._file_managed_ids.add(token_id)
 
     # ── 订单发现 ──────────────────────────────────────────────────────────────
     def discover(self):
@@ -599,14 +621,17 @@ class Guardian:
     def _shutdown(self):
         logger.info("开始优雅关闭...")
 
-        # 取消所有活跃订单
+        # 批量提交所有撤单（先全部提交，再统一等待）
+        futs = []
         for a in self.list_actors():
             if a.active_id:
                 fut = self.exec_layer.cancel(a.active_id, "系统关闭")
-                try:
-                    fut.result(timeout=self.cfg.cancel_timeout)
-                except Exception:
-                    pass
+                futs.append(fut)
+        for fut in futs:
+            try:
+                fut.result(timeout=self.cfg.cancel_timeout)
+            except Exception:
+                pass
 
         # 停止所有 Actor
         for a in self.list_actors():

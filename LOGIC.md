@@ -50,6 +50,8 @@ Guardian 是一个 **纯 Maker（挂单方）** 自动化做市机器人，运�
 
 配置 `MARKET_FILE` 指向 screener 输出的 CSV 文件，Guardian 每 30s 读取文件，为 YES 和 NO 两个 token 各自创建 Actor 并自动启动挂单周期。这是主要市场来源。
 
+Guardian 跟踪哪些 token_id 来自 CSV 文件（`_file_managed_ids`）。当某个 token_id 在 CSV 中不再出现时（screener 筛选条件变化导致市场被移除），Guardian 会停止该市场的 Actor：取消活跃订单、停止监控并从管理列表中移除。CSV 文件同步的移除机制仅对来自方式一的市场生效——来自方式二的市场不受 CSV 变化影响。
+
 **方式二：已有订单接管（被动）**
 
 每 30s 执行 `discover()` 扫描已有买单，发现未被管理的订单时创建 Actor 接管。用于重启后恢复之前已在交易所挂着的订单。
@@ -233,7 +235,7 @@ Polymarket 要求通过 REST API 每约 10 秒发送一次心跳（`POST /v1/hea
 
 | 任务 | 间隔 | 职责 |
 |------|------|------|
-| discover() | 30s | 从订单接管 + CSV 文件同步新市场；清理 STOPPED 状态 Actor |
+| discover() | 30s | 从订单接管 + CSV 文件同步新增/移除市场；清理 STOPPED 状态 Actor |
 | _poll_best_bids() | 3s | 批量查询 `POST /books`，检测 best_bid 变化推送给 Actor |
 | audit() | 120s | 批量 `POST /books` 查 best_bid，纠偏超价订单；检测订单丢失；状态卡死重置 |
 | check_positions() | 120s | 扫描持仓 → 补挂限价卖单（唯一卖出路径） |
