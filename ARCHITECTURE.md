@@ -300,22 +300,10 @@ check_positions() 每 120s 执行：
 
 | 任务 | 间隔 | 功能 |
 |------|------|------|
-| `discover()` | 30s | 发现新订单创建 Actor、多周期检测清理废弃 Actor |
+| `discover()` | 30s | 发现新订单创建 Actor、清理 STOPPED 状态 Actor |
 | `audit()` | 120s | 纠偏超价订单（price ≥ best_bid 即撤单）、检测订单丢失、状态卡死重置 |
 | `check_positions()` | 120s | **唯一卖出路径**：查持仓 → 已有卖单跳过 → 无卖单补挂限价卖单 |
 | `_prune_caches()` | 300s | 清理过期 `_ob_cache`、`_market_info`、`_processed_trades`（按时间戳有序淘汰） |
-
-**discover() 多周期放弃逻辑**：
-
-```
-有买单 → 重置对应资产的 abandon 计数器
-无买单 + 有活跃 Actor → 可能 API 异常，跳过清理
-无买单 + 无活跃 Actor → 对每个 NO_ORDER 状态 Actor 累计计数
-  → 连续 ABANDON_CYCLES 次（默认 3×30s=90s）→ 放弃该市场
-  → COOLING 状态不计数（有定时器等待重挂）
-```
-
-- `audit()` 在全局无买单时额外清理 NO_ORDER 状态的 Actor
 
 **handle_trade() — 仅记录日志**：
 
@@ -421,7 +409,6 @@ WS CANCELLATION 事件不再处理（仅记录 debug 日志）。撤单完全由
 |----------|----------|-------------|
 | best_bid 变化 | `_cancel()` → COOLING → 重挂 | ❌ 不放弃 |
 | audit 纠偏 | `exec_layer.cancel()` + `CANCEL_DONE` | ❌ 不放弃 |
-| discover 多周期无买单 | 3 次 NO_ORDER → `remove_actor()` + `stop()` | ✅ 放弃 |
 | market_resolved | actor.stop() → remove_actor() | ✅ 放弃 |
 
 ***
@@ -497,7 +484,6 @@ guardian_v7/
 │   ├── guardian.log  # 主日志
 │   ├── trades.log    # 买卖配对记录
 │   ├── cancels.log   # 撤单记录（已废弃，不再写入）
-│   └── abandons.log  # 放弃市场记录
 └── tests/            # 78 个单元测试
     ├── test_utils.py
     ├── test_models.py
@@ -572,4 +558,3 @@ python main.py
 | `data/guardian.log` | 全部运行日志（控制台同步输出） |
 | `data/trades.log` | 买卖配对：每笔买入+卖出成对记录 |
 | `data/cancels.log` | 撤单记录（已废弃） |
-| `data/abandons.log` | 放弃记录：asset_id + market title + 原因 |

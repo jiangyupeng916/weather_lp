@@ -59,7 +59,6 @@ def _file_logger(name: str) -> logging.Logger:
 
 
 trade_logger = _file_logger("trades")
-abandon_logger = _file_logger("abandons")
 
 
 class Guardian:
@@ -103,10 +102,6 @@ class Guardian:
         self._cache_lock = threading.RLock()
         self._ob_cache: Dict[str, Tuple[float, float]] = {}
         self._market_info: Dict[str, dict] = {}
-
-        # ── 放弃保护：连续 N 次 discover 无买单才真正放弃 ────────────────────────
-        self._abandon_pending: Dict[str, int] = {}  # asset_id → 连续无买单次数
-        self.ABANDON_CYCLES = 3  # 连续 3 次(×30s=90s)无买单才放弃
 
         # ── 信号处理 ──────────────────────────────────────────────────────────
         signal.signal(signal.SIGINT, self._on_signal)
@@ -244,45 +239,7 @@ class Guardian:
             if actor and actor.state is ActorState.STOPPED:
                 self.remove_actor(aid)
                 actor.force_stop()
-                self._abandon_pending.pop(aid, None)
                 logger.info("[DISCOVER] 清理 STOPPED 市场 %s", aid[:20])
-
-        # 多周期反向清理：只有连续 N 次 discover 都无买单才放弃
-        if not buys:
-            active_count = sum(
-                1 for a in self.list_actors()
-                if a.state in (ActorState.RESTING, ActorState.PLACING) and a.active_id
-            )
-            if active_count > 0:
-                logger.warning("[DISCOVER] open_orders 无买单但仍有活跃 Actor，可能 API 异常，跳过反向清理")
-                # 重置所有待放弃计数器
-                self._abandon_pending.clear()
-            else:
-                # 检查每个当前无买单的 Actor，累计计数
-                # 注意：COOLING 状态不计数 — Actor 有定时器在等待重挂，不应被放弃
-                for aid in self.list_actor_ids():
-                    actor = self.get_actor(aid)
-                    if actor and actor.state == ActorState.NO_ORDER and not actor.active_id:
-                        self._abandon_pending[aid] = self._abandon_pending.get(aid, 0) + 1
-                        if self._abandon_pending[aid] >= self.ABANDON_CYCLES:
-                            logger.info("[ABANDON] %s 连续 %d 次无买单，放弃守护", aid[:20], self._abandon_pending[aid])
-                            removed = self.remove_actor(aid)
-                            self._abandon_pending.pop(aid, None)
-                            mi = self.market_info(aid)
-                            msg = f"asset_id={aid} | title={mi.get('title','未知')[:50]} | reason=多周期无买单"
-                            abandon_logger.info(msg)
-                            if removed:
-                                removed.stop(cancel_active=False)
-                # 清理不再存在于 actors 中的计数器
-                actor_ids = set(self.list_actor_ids())
-                stale = [aid for aid in self._abandon_pending if aid not in actor_ids]
-                for aid in stale:
-                    self._abandon_pending.pop(aid, None)
-        else:
-            # 有买单 → 重置对应资产和所有待放弃计数器
-            for aid in list(self._abandon_pending.keys()):
-                if aid in buys:
-                    self._abandon_pending.pop(aid, None)
 
         # 发现新市场
         for asset_id in set(buys.keys()) - set(self.list_actor_ids()):
@@ -291,7 +248,6 @@ class Guardian:
             actor = AssetActor(asset_id, self, initial=o)
             self.add_actor(asset_id, actor)
             self._sub_market(asset_id)
-            self._abandon_pending.pop(asset_id, None)
 
         logger.info("[DISCOVER] 守护 %d 个市场", self.actor_count())
 
@@ -313,30 +269,6 @@ class Guardian:
             a.post(ActorEvent(EventType.AUDIT, {"orders": order_map}))
 
         buys = [o for o in orders if o.side.upper() == "BUY"]
-
-        if not buys:
-            active_count = sum(
-                1 for a in self.list_actors()
-                if a.state in (ActorState.RESTING, ActorState.PLACING) and a.active_id
-            )
-            if active_count > 0:
-                logger.warning("[AUDIT] open_orders 无买单但仍有活跃 Actor，可能 API 异常，跳过清理")
-                return
-
-            to_remove = [
-                aid for aid in self.list_actor_ids()
-                if (lambda a: a and not a.active_id and a.state in (ActorState.NO_ORDER,))(self.get_actor(aid))
-            ]
-            for aid in to_remove:
-                actor = self.remove_actor(aid)
-                if actor:
-                    mi = self.market_info(aid)
-                    msg = f"asset_id={aid} | title={mi.get('title','未知')[:50]} | reason=审计清理-全局无买单"
-                    abandon_logger.info(msg)
-                    logger.info("[ABANDON] 放弃市场 %s | 审计清理", aid[:20])
-                    actor.stop(cancel_active=False)
-            logger.info("[AUDIT] 无买单，清理完毕")
-            return
 
         to_cancel: List[Tuple[OrderInfo, str]] = []
         for o in buys:
