@@ -58,6 +58,9 @@ class Config:
     stale_timeout: float = 60.0
     cooldown_delay: float = 2.0
 
+    # ── 市场筛选文件 ──────────────────────────────────────────────────────────
+    market_file: str = field(default_factory=lambda: os.environ.get("MARKET_FILE", ""))
+
     # ── 缓存与并发 ────────────────────────────────────────────────────────────
     cache_ttl: float = 5.0
     cancel_delay: float = 0.3

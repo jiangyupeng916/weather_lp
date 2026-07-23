@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import os
@@ -266,6 +267,43 @@ class Guardian:
             logger.error("余额查询失败: %s", e)
             return 0.0
 
+    # ── 市场文件同步 ──────────────────────────────────────────────────────────
+    def _load_market_targets(self) -> List[Tuple[str, str]]:
+        """读取市场筛选 CSV 文件，返回 [(token_id, title), ...] 列表。"""
+        csv_path = self.cfg.market_file
+        if not csv_path:
+            return []
+        try:
+            with open(csv_path, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                targets = []
+                for row in reader:
+                    yes_id = (row.get("yes_token_id") or "").strip()
+                    no_id = (row.get("no_token_id") or "").strip()
+                    title = (row.get("Market") or "").strip()
+                    if yes_id:
+                        targets.append((yes_id, f"{title} [YES]" if title else ""))
+                    if no_id:
+                        targets.append((no_id, f"{title} [NO]" if title else ""))
+                return targets
+        except Exception as e:
+            logger.error("[SYNC] 读取市场文件失败: %s", e)
+            return []
+
+    def _sync_from_file(self):
+        """从 CSV 文件同步市场，为新 token_id 创建 Actor 并启动挂单周期。"""
+        targets = self._load_market_targets()
+        if not targets:
+            return
+        current_ids = set(self.list_actor_ids())
+        for token_id, title in targets:
+            if token_id not in current_ids:
+                logger.info("[SYNC] 新市场 %s | %s", token_id[:20], title[:50])
+                actor = AssetActor(token_id, self)
+                self.add_actor(token_id, actor)
+                # 立即启动短冷却，冷却到期后查价挂单
+                actor._start_cooldown(duration=self.cfg.cooldown_delay)
+
     # ── 订单发现 ──────────────────────────────────────────────────────────────
     def discover(self):
         orders = self.open_orders()
@@ -279,12 +317,15 @@ class Guardian:
                 actor.force_stop()
                 logger.info("[DISCOVER] 清理 STOPPED 市场 %s", aid[:20])
 
-        # 发现新市场
+        # 发现新市场（已有挂单）
         for asset_id in set(buys.keys()) - set(self.list_actor_ids()):
             o = buys[asset_id]
             logger.info("[DISCOVER] 新市场 %s price=%s", asset_id[:20], o.price)
             actor = AssetActor(asset_id, self, initial=o)
             self.add_actor(asset_id, actor)
+
+        # 从 CSV 文件同步
+        self._sync_from_file()
 
         logger.info("[DISCOVER] 守护 %d 个市场", self.actor_count())
 
