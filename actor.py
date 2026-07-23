@@ -157,7 +157,6 @@ class AssetActor:
             self.bids.pop(pr, None)
         else:
             self.bids[pr] = sz
-        self._check_target_changed()
 
     def _on_best_bid(self, p: dict):
         new_bid = safe_decimal(p.get("best_bid"))
@@ -173,7 +172,6 @@ class AssetActor:
             return
 
         if new_bid == self.best_bid:
-            self._check_target_changed()
             return
 
         self.best_bid = new_bid
@@ -354,11 +352,5 @@ class AssetActor:
         # P1 修复：对齐到 tick_size
         return round_to_tick(raw, self.tick_size)
 
-    def _check_target_changed(self):
-        """RESTING 状态下若 target_price 与 active_price 不一致，触发撤单。"""
-        if self.state is not ActorState.RESTING or self.active_price is None:
-            return
-        target = self._target_price()
-        if target is not None and target != self.active_price:
-            logger.info("[TARGET CHG] %s %s -> %s", self.asset_id[:16], self.active_price, target)
-            self._cancel("target_price变化")
+
+

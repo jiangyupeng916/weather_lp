@@ -8,7 +8,7 @@ Guardian V7 是一个 **Polymarket CLOB 交易平台的 Maker-only 自动化做�
 
 **关键行为规则**：
 
-- **系统撤单**（best_bid 变化 / target_price 变化 / WSS 重连）：Actor 冷却 120s → 重新挂单
+- **系统撤单**（best_bid 变化 / WSS 重连）：Actor 冷却 120s → 重新挂单
 - **卖出**：不依赖 WS 事件驱动，由 `check_positions()` 每 120s 定时扫描持仓 → 补挂限价卖单
 
 **技术栈**：Python 3.12+ | `py_clob_client_v2` | `websocket-client` | `eth_account` | `requests`
@@ -261,7 +261,6 @@ check_positions() 每 120s 执行：
 | best_bid 首次接收到 | 仅记录，不触发动作 |
 | best_bid 变化 + RESTING | 撤单重挂 |
 | best_bid 变化 + NO_ORDER | 启动冷却 |
-| target_price 变化 + RESTING | `_check_target_changed()` 触发撤单 |
 
 ### 3.7 ws_manager.py + ws_router.py — WebSocket 层
 
@@ -387,7 +386,7 @@ check_positions() 每 120s 执行：
 ### 唯一撤单路径：系统主动撤单
 
 ```
-best_bid 变化 / target_price 变化 / WSS 重连 / audit 纠偏
+best_bid 变化 / WSS 重连 / audit 纠偏
     │
     ▼
 Actor._cancel(reason)  或  audit → exec_layer.cancel() + CANCEL_DONE
