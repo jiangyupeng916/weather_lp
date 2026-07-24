@@ -82,7 +82,7 @@ class Guardian:
 
         # ── 组件初始化（按依赖顺序） ───────────────────────────────────────────
         self.heartbeat = HeartbeatManager(self.client, self.cfg, self.address, self.creds)
-        self.exec_layer = ExecutionLayer(self.client, self.cfg, self.address, self.creds)
+        self.exec_layer = ExecutionLayer(self.client, self.cfg)
         self.ws_manager = WSManager(self.cfg)
         self.ws_router = WSRouter(self)
 

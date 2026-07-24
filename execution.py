@@ -12,18 +12,12 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 import logging
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Dict, List, Optional, Set
-
-import requests
 
 from py_clob_client_v2 import (
     ClobClient,
@@ -45,11 +39,9 @@ class ExecutionLayer:
     CANCEL_TOKEN_MAX = 10000
     BATCH_CANCEL_MAX = 1000
 
-    def __init__(self, client: ClobClient, cfg: Config, signer_address: str, creds):
+    def __init__(self, client: ClobClient, cfg: Config):
         self._client = client
         self._cfg = cfg
-        self._signer_address = signer_address
-        self._api_creds = creds
         self._cancel_tokens: Set[str] = set()
         self._place_tokens: Dict[str, float] = {}
         self._lock_cancel = threading.Lock()
@@ -76,24 +68,6 @@ class ExecutionLayer:
                 fut.set_exception(e)
         self._executor.submit(_wrapper)
         return fut
-
-    # ── L2 签名 ────────────────────────────────────────────────────────────────
-    def _l2_headers(self, method: str, path: str, body: str) -> dict:
-        ts = str(int(datetime.now(timezone.utc).timestamp()))
-        sig_msg = ts + method + path + body
-        signature = hmac.new(
-            self._api_creds.api_secret.encode(),
-            sig_msg.encode(),
-            hashlib.sha256,
-        ).hexdigest()
-        return {
-            "Content-Type": "application/json",
-            "POLY_ADDRESS": self._signer_address,
-            "POLY_SIGNATURE": signature,
-            "POLY_TIMESTAMP": ts,
-            "POLY_API_KEY": self._api_creds.api_key,
-            "POLY_PASSPHRASE": self._api_creds.api_passphrase,
-        }
 
     # ── 限流 ──────────────────────────────────────────────────────────────────
     def _rate_wait(self):
@@ -141,7 +115,7 @@ class ExecutionLayer:
             logger.error("[CANCEL FAIL] %s... | %s", order_id[:20], e)
             fut.set_result(False)
 
-    # ── 批量撤单（DELETE /orders，≤1000） ─────────────────────────────────────
+    # ── 批量撤单（SDK cancel_orders） ──────────────────────────────────────────
     def cancel_batch(self, order_ids: List[str], reason: str = "") -> Future:
         """批量撤单，返回 Future[dict] → {"canceled": [...], "not_canceled": {...}}。"""
         fut: Future = Future()
@@ -149,39 +123,26 @@ class ExecutionLayer:
             fut.set_result({"canceled": [], "not_canceled": {}})
             return fut
 
-        unique = list(dict.fromkeys(order_ids))  # 去重保序
+        unique = list(dict.fromkeys(order_ids))
         self._executor.submit(self._do_cancel_batch, unique, reason, fut)
         return fut
 
     def _do_cancel_batch(self, order_ids: List[str], reason: str, fut: Future):
         self._rate_wait()
-        all_canceled = []
-        all_not_canceled = {}
-        for chunk in [order_ids[i:i + self.BATCH_CANCEL_MAX]
-                      for i in range(0, len(order_ids), self.BATCH_CANCEL_MAX)]:
-            try:
-                path = "/orders"
-                url = f"{self._cfg.host}{path}"
-                serialized = json.dumps(chunk, separators=(",", ":"))
-                headers = self._l2_headers("DELETE", path, serialized)
-                r = requests.delete(url, headers=headers, data=serialized, timeout=15)
-                r.raise_for_status()
-                result = r.json()
-                canceled = result.get("canceled", [])
-                not_canceled = result.get("not_canceled", {})
-                all_canceled.extend(canceled)
-                all_not_canceled.update(not_canceled)
-                logger.info("[BATCH CANCEL] %d/%d 已取消 | %s",
-                            len(canceled), len(chunk), reason)
-                for oid, err in not_canceled.items():
-                    logger.error("[BATCH CANCEL FAIL] %s... | %s", oid[:20], err)
-            except Exception as e:
-                logger.error("[BATCH CANCEL ERR] chunk %d 条 | %s", len(chunk), e)
-                for oid in chunk:
-                    all_not_canceled[oid] = str(e)
-        fut.set_result({"canceled": all_canceled, "not_canceled": all_not_canceled})
+        try:
+            result = self._client.cancel_orders(order_ids)
+            canceled = result.get("canceled", [])
+            not_canceled = result.get("not_canceled", {})
+            logger.info("[BATCH CANCEL] %d/%d 已取消 | %s",
+                        len(canceled), len(order_ids), reason)
+            for oid, err in not_canceled.items():
+                logger.error("[BATCH CANCEL FAIL] %s... | %s", oid[:20], err)
+            fut.set_result({"canceled": canceled, "not_canceled": not_canceled})
+        except Exception as e:
+            logger.error("[BATCH CANCEL ERR] %d 条 | %s", len(order_ids), e)
+            fut.set_result({"canceled": [], "not_canceled": {oid: str(e) for oid in order_ids}})
 
-    # ── 全部撤单（DELETE /cancel-all） ────────────────────────────────────────
+    # ── 全部撤单（SDK cancel_all） ────────────────────────────────────────────
     def cancel_all(self, reason: str = "") -> Future:
         """取消所有活跃订单，一次 API 调用。返回 Future[bool]。"""
         fut: Future = Future()
@@ -191,12 +152,7 @@ class ExecutionLayer:
     def _do_cancel_all(self, reason: str, fut: Future):
         self._rate_wait()
         try:
-            path = "/cancel-all"
-            url = f"{self._cfg.host}{path}"
-            headers = self._l2_headers("DELETE", path, "")
-            r = requests.delete(url, headers=headers, timeout=15)
-            r.raise_for_status()
-            result = r.json()
+            result = self._client.cancel_all()
             canceled = result.get("canceled", [])
             not_canceled = result.get("not_canceled", {})
             logger.info("[CANCEL ALL] %d 已取消 | %s", len(canceled), reason)
