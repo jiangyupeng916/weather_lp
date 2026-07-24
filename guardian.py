@@ -723,16 +723,10 @@ class Guardian:
                 if bal <= self.cfg.position_threshold:
                     continue
 
-                price = safe_float(p.get("avgPrice", 0))
-                if price <= 0:
-                    continue
+                logger.info("[MARKET SELL] %s | %.4f shares",
+                            p.get("title", "未知")[:40], bal)
 
-                sell_price = safe_float_from_decimal(
-                    round_to_tick(Decimal(str(price)), self.cfg.tick_size)
-                )
-                logger.info("[POLL SELL] %s | %.4f @ %s", p.get("title", "未知")[:40], bal, sell_price)
-
-                fut = self.exec_layer.limit_sell(tid, sell_price, bal, self.cfg.tick_size)
+                fut = self.exec_layer.market_sell(tid, bal, self.cfg.tick_size)
                 try:
                     sell_oid = fut.result(timeout=self.cfg.place_timeout)
                 except Exception:
@@ -742,19 +736,20 @@ class Guardian:
                     trade_logger.info(json.dumps({
                         "buy": {
                             "token_id": tid, "side": "BUY",
-                            "size": bal, "price": price,
+                            "size": bal,
+                            "price": safe_float(p.get("avgPrice", 0)),
                             "title": p.get("title", ""), "outcome": p.get("outcome", ""),
                             "source": "polling",
                         },
                         "sell": {
                             "order_id": sell_oid, "token_id": tid, "side": "SELL",
-                            "size": bal, "price": sell_price,
+                            "size": bal, "type": "MARKET_FOK",
                         },
                     }, ensure_ascii=False))
-                    logger.info("[POLL SELL OK] %s id=%s", tid[:20], str(sell_oid)[:20])
+                    logger.info("[MARKET SELL OK] %s id=%s", tid[:20], str(sell_oid)[:20])
                     placed += 1
                 else:
-                    logger.error("[POLL SELL FAIL] %s 限价卖单下单失败", tid[:20])
+                    logger.error("[MARKET SELL FAIL] %s 市价卖单失败", tid[:20])
             finally:
                 with self._sell_lock:
                     self._selling.discard(tid)
@@ -762,7 +757,7 @@ class Guardian:
             time.sleep(0.3)
 
         if placed:
-            logger.info("[POSITION] 兜底限价卖单 %d 个", placed)
+            logger.info("[POSITION] 市价卖出 %d 个", placed)
 
     # ── 缓存清理 ──────────────────────────────────────────────────────────────
     def _prune_caches(self):

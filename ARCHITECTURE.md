@@ -4,13 +4,13 @@
 
 Guardian V7 是一个 **Polymarket CLOB 交易平台的 Maker-only 自动化做市机器人**。
 
-**核心目的**：挂单提供流动性以获取平台返利奖励。机器人在订单簿买盘第 N 档挂限价买单，best_bid 变化时撤单重挂。买入成交后，由 `check_positions()` 定时扫描持仓并补挂同价限价卖单平仓。
+**核心目的**：挂单提供流动性以获取平台返利奖励。机器人在订单簿买盘第 N 档挂限价买单，best_bid 变化时撤单重挂。买入成交后，由 `check_positions()` 定时扫描持仓并市价卖出（FOK）平仓。
 
 **关键行为规则**：
 
 - **市场来源**：由 screener 输出的 CSV 文件提供（YES + NO 两个 token 各自独立管理）
 - **系统撤单**（best_bid 变化）：Actor 冷却 120s → 重新挂单
-- **卖出**：不依赖 WS 事件驱动，由 `check_positions()` 每 120s 定时扫描持仓 → 补挂限价卖单
+- **卖出**：不依赖 WS 事件驱动，由 `check_positions()` 每 120s 定时扫描持仓 → 市价卖出（FOK）
 
 **技术栈**：Python 3.12+ | `py_clob_client_v2` | `websocket-client` | `eth_account` | `requests`
 
@@ -78,9 +78,9 @@ utils.py    ← 无内部依赖（纯函数工具）
 
 ## 三、核心组件详解
 
-### 3.0 卖出策略 — 定时扫描持仓（不依赖 WS 事件）
+### 3.0 卖出策略 — 定时扫描持仓（市价 FOK 卖出）
 
-**卖出唯一路径**：`check_positions()` 每 120s 定时扫描，不依赖 WS trade 事件触发。
+**卖出唯一路径**：`check_positions()` 每 120s 定时扫描，发现持仓后**市价卖出（FOK）**。
 
 数据流：
 
@@ -92,9 +92,9 @@ check_positions() 每 120s 执行：
     ├─ 2. 查询 open_orders() 找出已有卖单的 token_id
     │
     ├─ 3. 对每个持仓：
-    │     ├─ 已有卖单 → 跳过
+    │     ├─ 已有卖单 → 跳过（避免重复）
     │     ├─ 正在卖出中 → 跳过（并发保护）
-    │     └─ 无卖单 → onchain_balance() → limit_sell(avgPrice, balance)
+    │     └─ 无卖单 → onchain_balance() → market_sell(balance)
     │           ├─ 成功 → trade_logger 记录 buy/sell 配对
     │           └─ 失败 → 记录错误日志，下轮重试
     │
@@ -105,7 +105,9 @@ check_positions() 每 120s 执行：
 - 简单可靠：不依赖 WS CONFIRMED → 立即卖出的复杂链路
 - 天然去重：查询已有卖单后再决定是否补挂
 - 自愈能力：重启/事件丢失后最多 120s 自动补挂
-- 数据安全：查询 open_orders 过滤已有卖单，查询 onchain_balance 确认余额后才下单
+- 数据安全：查询 onchain_balance 确认链上余额后才下单
+- **FOK 语义**：Fill-or-Kill，要么全部成交要么全部撤销，不产生部分成交残留
+- **市价不传 price**：SDK `calculate_market_price` 自动根据订单簿深度计算可成交价格
 
 `handle_trade()` 仅记录 CONFIRMED 事件到 trade_logger 用于审计，不触发任何卖出动作。
 
@@ -185,14 +187,17 @@ check_positions() 每 120s 执行：
 | 幂等-撤单 | `_cancel_tokens`：同一 order_id 不重复撤单 |
 | 异步 | 全部方法返回 `Future`，由 `ThreadPoolExecutor`（≤10 workers）执行 |
 | 价格对齐 | `place()` 内调用 `round_to_tick()` + `PartialCreateOrderOptions(tick_size=...)` |
+| 下单兜底 | `_do_place` 异常时查 `open_orders` 确认订单是否已挂 |
 
 **公共方法**：
 
 | 方法 | 用途 | 返回 |
 |------|------|------|
-| `place(asset_id, price, size, tick_size)` | 下限价买单（BUY） | `Future[Optional[str]]` order_id |
+| `place(asset_id, price, size, tick_size)` | 下限价买单（BUY, Post-Only） | `Future[Optional[str]]` order_id |
 | `cancel(order_id, reason)` | 撤单 | `Future[bool]` |
-| `limit_sell(asset_id, price, size, tick_size)` | 下限价卖单（SELL, GTC） | `Future[Optional[str]]` order_id |
+| `market_sell(asset_id, size, tick_size)` | 市价卖单（SELL, FOK） | `Future[Optional[str]]` order_id |
+| `cancel_batch(order_ids, reason)` | 批量撤单（≤1000） | `Future[dict]` |
+| `cancel_all(reason)` | 全部撤单（shutdown 用） | `Future[bool]` |
 | `clear_place(asset_id, price)` | 清除下单幂等 token | — |
 | `clear_place_by_asset(asset_id)` | 清除某资产全部下单 token | — |
 
@@ -281,7 +286,7 @@ Guardian 每 3s 通过 `POST /books` 批量查询所有市场的订单簿，提�
 |------|------|------|
 | `discover()` | 30s | 接管已有买单 + CSV 文件同步新市场、清理 STOPPED 状态 Actor |
 | `audit()` | 120s | 批量 `POST /books` 查 best_bid，纠偏超价订单（price ≥ best_bid 即撤单）、检测订单丢失、状态卡死重置 |
-| `check_positions()` | 120s | **唯一卖出路径**：查持仓 → 已有卖单跳过 → 无卖单补挂限价卖单 |
+| `check_positions()` | 120s | **唯一卖出路径**：查持仓 → 已有卖单跳过 → 无卖单市价卖出（FOK） |
 | `_prune_caches()` | 300s | 清理过期 `_ob_cache`、`_market_info`、`_processed_trades`（按时间戳有序淘汰） |
 
 **handle_trade() — 仅记录日志**：
@@ -307,7 +312,7 @@ Guardian 每 3s 通过 `POST /books` 批量查询所有市场的订单簿，提�
 ```
 获取持仓 → 查询 open_orders() → 找到已有的 SELL 订单
   ├─ 已有卖单 → 跳过
-  └─ 无卖单 → onchain_balance() → limit_sell(avgPrice, balance)
+  └─ 无卖单 → onchain_balance() → market_sell(balance)  # FOK 市价
 ```
 
 - 并发保护：`_selling` set + `_sell_lock`

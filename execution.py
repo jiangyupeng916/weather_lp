@@ -25,6 +25,8 @@ from py_clob_client_v2 import (
     OrderPayload,
     PartialCreateOrderOptions,
     OpenOrderParams,
+    MarketOrderArgs,
+    OrderType,
 )
 
 from config import Config
@@ -255,32 +257,36 @@ class ExecutionLayer:
                 return o.get("id") or o.get("order_id")
         return None
 
-    # ── 限价卖单 ──────────────────────────────────────────────────────────────
-    def limit_sell(self, asset_id: str, price: float, size: float, tick_size: Decimal) -> Future:
-        """异步下限价卖单，返回 Future[Optional[str]]（order_id 或 None）。"""
+    # ── 市价卖单（FOK） ─────────────────────────────────────────────────────
+    def market_sell(self, asset_id: str, size: float, tick_size: Decimal) -> Future:
+        """异步市价卖出（FOK，全成或全撤），返回 Future[Optional[str]]（order_id 或 None）。
+
+        size 为持仓份额（shares），SDK 会自动计算市价。FOK 语义保证要么全部成交，
+        要么全部撤销，不会产生部分成交残留。
+        """
         fut: Future = Future()
-        self._executor.submit(self._do_limit_sell, asset_id, price, size, tick_size, fut)
+        self._executor.submit(self._do_market_sell, asset_id, size, tick_size, fut)
         return fut
 
-    def _do_limit_sell(self, asset_id: str, price: float, size: float, tick_size: Decimal, fut: Future):
+    def _do_market_sell(self, asset_id: str, size: float, tick_size: Decimal, fut: Future):
         self._rate_wait()
         try:
-            res = self._client.create_and_post_order(
-                order_args=OrderArgs(
+            res = self._client.create_and_post_market_order(
+                order_args=MarketOrderArgs(
                     token_id=asset_id,
-                    price=price,
-                    size=size,
+                    amount=size,
                     side="SELL",
                 ),
                 options=PartialCreateOrderOptions(tick_size=str(tick_size)),
+                order_type=OrderType.FOK,
             )
             order_id = res.get("orderID") or res.get("order_id")
-            logger.info("[LIMIT SELL OK] %s... price=%s size=%s id=%s",
-                        asset_id[:16], price, size, str(order_id)[:20] if order_id else "N/A")
+            logger.info("[MARKET SELL OK] %s... size=%s id=%s",
+                        asset_id[:16], size, str(order_id)[:20] if order_id else "N/A")
             fut.set_result(order_id)
         except Exception as e:
-            logger.error("[LIMIT SELL FAIL] %s... price=%s size=%s | %s",
-                         asset_id[:16], price, size, e)
+            logger.error("[MARKET SELL FAIL] %s... size=%s | %s",
+                         asset_id[:16], size, e)
             fut.set_result(None)
 
     # ── 令牌管理 ──────────────────────────────────────────────────────────────
