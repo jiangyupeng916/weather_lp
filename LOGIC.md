@@ -48,15 +48,29 @@ Guardian 是一个 **纯 Maker（挂单方）** 自动化做市机器人，运�
 
 **方式一：CSV 文件同步（主动）**
 
-配置 `MARKET_FILE` 指向 screener 输出的 CSV 文件，Guardian 每 30s 读取文件，为 YES 和 NO 两个 token 各自创建 Actor 并自动启动挂单周期。这是主要市场来源。
+配置 `MARKET_FILE` 指向 screener 输出的 CSV 文件，Guardian 每 30s 读取文件，为 YES 和 NO 两个 token 各自初始化 `MarketState` 并自动启动挂单周期。这是主要市场来源。
 
-Guardian 跟踪哪些 token_id 来自 CSV 文件（`_file_managed_ids`）。当某个 token_id 在 CSV 中不再出现时（screener 筛选条件变化导致市场被移除），Guardian 会停止该市场的 Actor：取消活跃订单、停止监控并从管理列表中移除。CSV 文件同步的移除机制仅对来自方式一的市场生效——来自方式二的市场不受 CSV 变化影响。
+Guardian 跟踪哪些 token_id 来自 CSV 文件（`_file_managed_ids`）。当某个 token_id 在 CSV 中不再出现时（screener 筛选条件变化导致市场被移除），Guardian 会停止该市场的监控：取消活跃订单并从管理列表中移除。CSV 文件同步的移除机制仅对来自方式一的市场生效——来自方式二的市场不受 CSV 变化影响。
+
+**CSV 空 token_id 处理**：若某行的 `yes_token_id` 或 `no_token_id` 为空字符串，该侧被自动跳过。只留 YES 则只监控 YES；两个都空则整行不参与监控。这允许在不删除行的情况下临时排除特定市场。
 
 **方式二：已有订单接管（被动）**
 
-每 30s 执行 `discover()` 扫描已有买单，发现未被管理的订单时创建 Actor 接管。用于重启后恢复之前已在交易所挂着的订单。
+每 30s 执行 `discover()` 扫描已有买单，发现未被管理的订单时初始化 `MarketState` 接管。用于重启后恢复之前已在交易所挂着的订单。
 
 两种方式并行，token_id 自动去重。
+
+### 2.5 Post-Only 保护
+
+所有 BUY 下单使用 `post_only=True`。Post-Only 订单要么挂在簿上赚返利，要么被 API 拒绝——绝不会以 Taker 身份成交。挂单时若市场突然波动导致价格跨价，订单被拒绝（400: `invalid post-only order: order crosses book`），Guardian 识别此错误后跳过无意义重试，由冷却→重新查价自然恢复。
+
+这是 Guardian 纯 Maker 性质的最终保证——无需依赖 poll 频率或 audit 纠偏来避免吃单。
+
+### 2.6 批量撤单
+
+大量市场同时需要撤销时（如一轮 poll 检测到多个 best_bid 变化），不再逐个调用 `DELETE /order`，而是收集所有 order_id 后一次 `DELETE /orders`（≤1000 个）批量取消。
+
+系统关闭时使用 `DELETE /cancel-all` 一次 API 调用清空所有订单，不再遍历逐个取消。
 
 ---
 

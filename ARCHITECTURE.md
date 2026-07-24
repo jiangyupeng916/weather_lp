@@ -420,7 +420,7 @@ WS CANCELLATION 事件不再处理（仅记录 debug 日志）。撤单完全由
 - 删除 `exec_layer.submit()`（无调用方）
 - Actor 移除 `_on_trade_matched` 处理器
 
-### V7.4（2026-07-23）：集中式状态管理 — 删除 Actor 线程
+### V7.4（2026-07-24）：集中式状态管理 + Post-Only + 批量撤单
 
 - 删除 `actor.py`：不再每市场一个线程 + 事件队列 + Timer
 - 所有市场状态集中到主线程 `Dict[str, MarketState]`，直读直写，无锁
@@ -429,7 +429,10 @@ WS CANCELLATION 事件不再处理（仅记录 debug 日志）。撤单完全由
 - `_poll_best_bids()` / `audit()` 直接读写 MarketState（替代 post BEST_BID/AUDIT 事件）
 - 线程数：400+ 市场 → 固定 ~14 线程（无市场数量相关线程）
 - CSV 同步支持市场移除（`_file_managed_ids` 追踪）
-- 关闭撤单批量提交（先全部提交，再统一等待）
+- GET /book 异步化（`run_async` 进线程池），主循环零阻塞
+- 批量撤单：`cancel_orders`（≤1000）用于 poll/audit；`cancel_all` 用于 shutdown
+- Post-Only：BUY 下单 `post_only=True`，绝对纯 Maker，跨价拒绝不重试
+- CSV 空 token_id 自动跳过（可临时排除特定市场）
 
 ### V7.3（2026-07-23）：best_bid 修复 + audit 优化 + 文档清理
 
