@@ -224,22 +224,26 @@ class Guardian:
 
     def _handle_batch_cancel_result(self, token_ids: List[str], reason: str,
                                       result: dict):
-        """根据批量撤单结果更新状态：成功的进入冷却，失败的回退 RESTING。"""
+        """根据批量撤单结果更新状态：成功的进入冷却，失败的也进入冷却（让 audit/poll 下轮重查）。
+
+        失败分支也进入冷却而非回退 RESTING，避免 SDK 返回 id 格式不一致时
+        形成死循环。同时清空 active_id，让下一轮 poll/audit 重新发现真实状态。
+        """
         canceled_set = set(result.get("canceled", []))
         for tid in token_ids:
             ms = self._markets.get(tid)
             if not ms or ms.state is not ActorState.CANCELING:
                 continue
             if ms.active_id in canceled_set:
-                ms.active_id = None
-                ms.active_price = None
-                ms.state = ActorState.NO_ORDER
-                ms.state_at = time.time()
-                self._start_cooldown(ms, self.cfg.maker_cooldown)
+                logger.info("[BATCH CANCEL] %s 取消成功", tid[:16])
             else:
-                logger.error("[BATCH CANCEL] %s 取消失败，保持 RESTING", tid[:16])
-                ms.state = ActorState.RESTING
-                ms.state_at = time.time()
+                logger.error("[BATCH CANCEL] %s 取消失败，清空 active_id 进入冷却兜底",
+                             tid[:16])
+            ms.active_id = None
+            ms.active_price = None
+            ms.state = ActorState.NO_ORDER
+            ms.state_at = time.time()
+            self._start_cooldown(ms, self.cfg.maker_cooldown)
 
     # ── 挂单动作（异步两步） ──────────────────────────────────────────────────
     def _trigger_place(self, token_id: str):
@@ -247,12 +251,38 @@ class Guardian:
         ms = self._markets.get(token_id)
         if not ms:
             return
+        # 流程级兜底：进入 PLACING 前确认该 token 没有任何残留活跃 BUY 订单
+        if self._has_existing_buy_order(token_id):
+            logger.warning("[PLACE GUARD] %s 已有活跃买单，跳过本次挂单",
+                           token_id[:16])
+            self._start_cooldown(ms, self.cfg.maker_cooldown)
+            return
         ms.state = ActorState.PLACING
         ms.state_at = time.time()
         fut = self.exec_layer.run_async(self._target_price, token_id)
         self._pending_ops.append((fut, token_id, "target_price", {}))
 
+    def _has_existing_buy_order(self, token_id: str) -> bool:
+        """查询该 token_id 是否已有活跃 BUY 订单（含孤儿订单）。"""
+        try:
+            raw = self.client.get_open_orders(OpenOrderParams(asset_id=token_id))
+        except Exception as e:
+            logger.warning("[PLACE GUARD] %s 查询失败: %s，保守放行",
+                            token_id[:16], e)
+            return False
+        for o in (raw or []):
+            if str(o.get("side", "")).upper() == "BUY":
+                return True
+        return False
+
     # ── 异步结果处理 ──────────────────────────────────────────────────────────
+    def _has_pending_op(self, token_id: str) -> bool:
+        """检查该 token 是否有未完成的异步操作。"""
+        for fut, tid, _op, _meta in self._pending_ops:
+            if tid == token_id and not fut.done():
+                return True
+        return False
+
     def _handle_cancel_result(self, ms: MarketState, token_id: str, ok: bool,
                                order_id: str, reason: str):
         if not ok:
@@ -320,11 +350,15 @@ class Guardian:
                     self._handle_batch_cancel_result(meta["order_ids"],
                                                       meta.get("reason", ""), result)
                 else:
+                    # 批量撤单异常：统一清空 active_id 进入冷却兜底
                     for tid in meta["order_ids"]:
-                        ms = self._markets.get(tid)
-                        if ms and ms.state is ActorState.CANCELING:
-                            ms.state = ActorState.RESTING
-                            ms.state_at = time.time()
+                        ms_sub = self._markets.get(tid)
+                        if ms_sub and ms_sub.state is ActorState.CANCELING:
+                            ms_sub.active_id = None
+                            ms_sub.active_price = None
+                            ms_sub.state = ActorState.NO_ORDER
+                            ms_sub.state_at = time.time()
+                            self._start_cooldown(ms_sub, self.cfg.maker_cooldown)
             elif op == "target_price":
                 # Step 2: 拿到订单簿价格后，提交实际下单
                 target = result
@@ -385,6 +419,9 @@ class Guardian:
         for token_id in list(removed):
             ms = self._markets.get(token_id)
             if ms and ms.active_id:
+                if ms.state is ActorState.CANCELING or self._has_pending_op(token_id):
+                    logger.info("[SYNC] %s 正在撤单中，延后移除", token_id[:20])
+                    continue
                 logger.info("[SYNC] 市场已从文件移除，停止监控 %s", token_id[:20])
                 self._trigger_cancel(token_id, "从CSV移除")
                 ms.active_id = None
@@ -555,6 +592,11 @@ class Guardian:
 
         # 逐个市场审计
         for token_id, ms in list(self._markets.items()):
+            # 有 pending Future 的市场跳过——状态机正在变更中，不应干预
+            if self._has_pending_op(token_id):
+                logger.debug("[AUDIT] %s 有 pending 操作，跳过", token_id[:16])
+                continue
+
             # 卡死的 PLACING/CANCELING 状态重置
             if ms.state in (ActorState.CANCELING, ActorState.PLACING) \
                     and (now - ms.state_at) > self.cfg.stale_timeout:

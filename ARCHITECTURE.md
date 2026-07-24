@@ -434,6 +434,30 @@ WS CANCELLATION 事件不再处理（仅记录 debug 日志）。撤单完全由
 - Post-Only：BUY 下单 `post_only=True`，绝对纯 Maker，跨价拒绝不重试
 - CSV 空 token_id 自动跳过（可临时排除特定市场）
 
+### V7.5（2026-07-24）：重复挂单根因修复（流程级防护）
+
+针对"同一市场出现 2 个活跃订单"的根因做流程级修复，**不依赖事后发现**：
+
+**P0：下单"假失败"恢复** — `execution.py:_do_place`
+- 网络异常/响应丢失场景下，`create_and_post_order` 抛异常不代表订单没挂上
+- 重试耗尽后调用 `_verify_order_placed()` 查询 `get_open_orders(asset_id=...)`，若已有同 asset+price 的 BUY 订单则视为下单成功，返回真实 order_id
+- 确认成功 → 不清幂等 token、不进入冷却重挂 → 杜绝第 2 单产生
+
+**P1：挂单前置检查** — `guardian.py:_trigger_place`
+- 进入 PLACING 前调用 `_has_existing_buy_order(token_id)` 查询该 token 是否已有活跃 BUY 订单（含孤儿订单）
+- 有残留 → 跳过本次挂单、重新进入冷却，下一轮再检查
+- 无残留 → 正常进入 PLACING，作为流程级兜底
+
+**P1：批量撤单失败兜底** — `guardian.py:_handle_batch_cancel_result`
+- 失败分支不再回退 RESTING（保留 active_id 死循环），改为也清空 active_id 进入冷却
+- 让下一轮 poll/audit 重新发现真实订单状态，避免 SDK 返回 id 格式不一致时的死循环
+- `cancel_batch` 异常分支（非 dict result）也走同样的兜底路径
+
+**P1：audit 与 pending Future 冲突** — `guardian.py:audit`
+- 新增 `_has_pending_op(token_id)` 检查
+- audit 遍历市场时跳过有 pending Future 的市场——状态机正在变更中，不应干预
+- `_sync_from_file` 移除市场时也用同样检查，避免撤单进行中删除 MarketState
+
 ### V7.3（2026-07-23）：best_bid 修复 + audit 优化 + 文档清理
 
 - 修复 `POST /books` best_bid 取反：API 文档声称 bids 降序，实际返回升序，`bids[0]` 取到最低价，改为 `bids[-1]`；asks 同理改为 `asks[-1]`

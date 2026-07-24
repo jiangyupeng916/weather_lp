@@ -24,10 +24,11 @@ from py_clob_client_v2 import (
     OrderArgs,
     OrderPayload,
     PartialCreateOrderOptions,
+    OpenOrderParams,
 )
 
 from config import Config
-from utils import safe_float_from_decimal, round_to_tick
+from utils import safe_float, safe_float_from_decimal, round_to_tick
 
 logger = logging.getLogger("guardian.exec")
 
@@ -220,9 +221,39 @@ class ExecutionLayer:
             if attempt < self._cfg.place_retries and not post_only_rejected:
                 time.sleep(self._cfg.place_retry_delay)
 
+        # 网络异常兜底：响应丢失不代表订单没挂上。查 open_orders 确认。
+        if not post_only_rejected:
+            confirmed_id = self._verify_order_placed(asset_id, price)
+            if confirmed_id:
+                logger.info("[PLACE RECOVERY] %s... price=%s 响应丢失但订单已挂 id=%s",
+                            asset_id[:16], price, str(confirmed_id)[:20])
+                fut.set_result(confirmed_id)
+                return
+
         with self._lock_place:
             self._place_tokens.pop(token, None)
         fut.set_result(None)
+
+    def _verify_order_placed(self, asset_id: str, price: Decimal) -> Optional[str]:
+        """网络异常后查询 open_orders，确认该 asset+price 是否已有挂单。
+
+        防止"API 已下单成功但响应丢失"场景下重复挂单。返回 order_id 或 None。
+        """
+        try:
+            raw = self._client.get_open_orders(OpenOrderParams(asset_id=asset_id))
+        except Exception as e:
+            logger.error("[PLACE RECOVERY] %s... 查询 open_orders 失败: %s",
+                         asset_id[:16], e)
+            return None
+        if not raw:
+            return None
+        target = float(price)
+        for o in raw:
+            if str(o.get("side", "")).upper() != "BUY":
+                continue
+            if abs(safe_float(o.get("price", 0)) - target) < 1e-9:
+                return o.get("id") or o.get("order_id")
+        return None
 
     # ── 限价卖单 ──────────────────────────────────────────────────────────────
     def limit_sell(self, asset_id: str, price: float, size: float, tick_size: Decimal) -> Future:
