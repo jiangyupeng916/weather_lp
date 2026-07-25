@@ -110,7 +110,7 @@ class ExecutionLayer:
         self._rate_wait()
         try:
             self._client.cancel_order(OrderPayload(orderID=order_id))
-            logger.info("[CANCEL OK] %s... | %s", order_id[:20], reason)
+            logger.debug("[CANCEL OK] %s... | %s", order_id[:20], reason)
             fut.set_result(True)
         except Exception as e:
             with self._lock_cancel:
@@ -136,7 +136,7 @@ class ExecutionLayer:
             result = self._client.cancel_orders(order_ids)
             canceled = result.get("canceled", [])
             not_canceled = result.get("not_canceled", {})
-            logger.info("[BATCH CANCEL] %d/%d 已取消 | %s",
+            logger.debug("[BATCH CANCEL] %d/%d 已取消 | %s",
                         len(canceled), len(order_ids), reason)
             for oid, err in not_canceled.items():
                 logger.error("[BATCH CANCEL FAIL] %s... | %s", oid[:20], err)
@@ -207,7 +207,7 @@ class ExecutionLayer:
                 )
                 order_id = res.get("orderID") or res.get("order_id")
                 if order_id:
-                    logger.info("[PLACE OK] %s... price=%s id=%s",
+                    logger.debug("[PLACE OK] %s... price=%s id=%s",
                                 asset_id[:16], price, str(order_id)[:20])
                     fut.set_result(order_id)
                     return
@@ -281,7 +281,7 @@ class ExecutionLayer:
                 order_type=OrderType.FOK,
             )
             order_id = res.get("orderID") or res.get("order_id")
-            logger.info("[MARKET SELL OK] %s... size=%s id=%s",
+            logger.debug("[MARKET SELL OK] %s... size=%s id=%s",
                         asset_id[:16], size, str(order_id)[:20] if order_id else "N/A")
             fut.set_result(order_id)
         except Exception as e:

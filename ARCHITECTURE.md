@@ -441,17 +441,12 @@ WS CANCELLATION 事件不再处理（仅记录 debug 日志）。撤单完全由
 
 ### V7.5（2026-07-24）：重复挂单根因修复（流程级防护）
 
-针对"同一市场出现 2 个活跃订单"的根因做流程级修复，**不依赖事后发现**：
+针对"同一市场出现 2 个活跃订单"的根因做修复，**不依赖事后发现**：
 
 **P0：下单"假失败"恢复** — `execution.py:_do_place`
 - 网络异常/响应丢失场景下，`create_and_post_order` 抛异常不代表订单没挂上
 - 重试耗尽后调用 `_verify_order_placed()` 查询 `get_open_orders(asset_id=...)`，若已有同 asset+price 的 BUY 订单则视为下单成功，返回真实 order_id
 - 确认成功 → 不清幂等 token、不进入冷却重挂 → 杜绝第 2 单产生
-
-**P1：挂单前置检查** — `guardian.py:_trigger_place`
-- 进入 PLACING 前调用 `_has_existing_buy_order(token_id)` 查询该 token 是否已有活跃 BUY 订单（含孤儿订单）
-- 有残留 → 跳过本次挂单、重新进入冷却，下一轮再检查
-- 无残留 → 正常进入 PLACING，作为流程级兜底
 
 **P1：批量撤单失败兜底** — `guardian.py:_handle_batch_cancel_result`
 - 失败分支不再回退 RESTING（保留 active_id 死循环），改为也清空 active_id 进入冷却
@@ -462,6 +457,12 @@ WS CANCELLATION 事件不再处理（仅记录 debug 日志）。撤单完全由
 - 新增 `_has_pending_op(token_id)` 检查
 - audit 遍历市场时跳过有 pending Future 的市场——状态机正在变更中，不应干预
 - `_sync_from_file` 移除市场时也用同样检查，避免撤单进行中删除 MarketState
+
+**已回滚的设计**：
+- ~~`_trigger_place` 挂单前置查 `get_open_orders` 确认无残留订单~~ — 该检查每次挂单都发
+  一次 HTTP，300+ 市场形成 HTTP 风暴，间接导致心跳请求超时被 401 拒绝、订单被交易所自动
+  取消。P0 已堵住"假失败重挂"这个唯一根因，残留订单场景在状态机里没有真实路径，前置
+  检查冗余且有害，已删除。
 
 ### V7.3（2026-07-23）：best_bid 修复 + audit 优化 + 文档清理
 

@@ -202,7 +202,7 @@ class Guardian:
         oid = ms.active_id
         ms.state = ActorState.CANCELING
         ms.state_at = time.time()
-        logger.info("[STATE] %s CANCELING %s... | %s", token_id[:16], oid[:20], reason)
+        logger.debug("[STATE] %s CANCELING %s... | %s", token_id[:16], oid[:20], reason)
         fut = self.exec_layer.cancel(oid, reason)
         self._pending_ops.append((fut, token_id, "cancel", {"order_id": oid, "reason": reason}))
 
@@ -217,7 +217,7 @@ class Guardian:
                 ms.state = ActorState.CANCELING
                 ms.state_at = time.time()
         if order_ids:
-            logger.info("[BATCH CANCEL] 批量撤单 %d 个 | %s", len(order_ids), reason)
+            logger.debug("[BATCH CANCEL] 批量撤单 %d 个 | %s", len(order_ids), reason)
             fut = self.exec_layer.cancel_batch(order_ids, reason)
             self._pending_ops.append((fut, "_batch_", "cancel_batch",
                                       {"order_ids": order_ids, "reason": reason}))
@@ -235,7 +235,7 @@ class Guardian:
             if not ms or ms.state is not ActorState.CANCELING:
                 continue
             if ms.active_id in canceled_set:
-                logger.info("[BATCH CANCEL] %s 取消成功", tid[:16])
+                logger.debug("[BATCH CANCEL] %s 取消成功", tid[:16])
             else:
                 logger.error("[BATCH CANCEL] %s 取消失败，清空 active_id 进入冷却兜底",
                              tid[:16])
@@ -251,29 +251,10 @@ class Guardian:
         ms = self._markets.get(token_id)
         if not ms:
             return
-        # 流程级兜底：进入 PLACING 前确认该 token 没有任何残留活跃 BUY 订单
-        if self._has_existing_buy_order(token_id):
-            logger.warning("[PLACE GUARD] %s 已有活跃买单，跳过本次挂单",
-                           token_id[:16])
-            self._start_cooldown(ms, self.cfg.maker_cooldown)
-            return
         ms.state = ActorState.PLACING
         ms.state_at = time.time()
         fut = self.exec_layer.run_async(self._target_price, token_id)
         self._pending_ops.append((fut, token_id, "target_price", {}))
-
-    def _has_existing_buy_order(self, token_id: str) -> bool:
-        """查询该 token_id 是否已有活跃 BUY 订单（含孤儿订单）。"""
-        try:
-            raw = self.client.get_open_orders(OpenOrderParams(asset_id=token_id))
-        except Exception as e:
-            logger.warning("[PLACE GUARD] %s 查询失败: %s，保守放行",
-                            token_id[:16], e)
-            return False
-        for o in (raw or []):
-            if str(o.get("side", "")).upper() == "BUY":
-                return True
-        return False
 
     # ── 异步结果处理 ──────────────────────────────────────────────────────────
     def _has_pending_op(self, token_id: str) -> bool:
@@ -294,7 +275,7 @@ class Guardian:
             ms.state_at = time.time()
             return
 
-        logger.info("[CANCEL OK] %s... | %s", order_id[:20], reason)
+        logger.debug("[CANCEL OK] %s... | %s", order_id[:20], reason)
         ms.active_id = None
         ms.active_price = None
         if ms.state == ActorState.COOLING:
@@ -310,7 +291,7 @@ class Guardian:
             ms.active_price = price
             ms.state = ActorState.RESTING
             ms.state_at = time.time()
-            logger.info("[STATE] %s RESTING %s... price=%s", token_id[:16], order_id[:20], price)
+            logger.debug("[STATE] %s RESTING %s... price=%s", token_id[:16], order_id[:20], price)
             self.exec_layer.clear_place(token_id, price)
         else:
             logger.error("[PLACE FAIL] %s price=%s", token_id[:16], price)
@@ -319,9 +300,7 @@ class Guardian:
             ms.state = ActorState.NO_ORDER
             ms.state_at = time.time()
             self.exec_layer.clear_place(token_id, price)
-            self._start_cooldown(ms, self.cfg.maker_cooldown)
-
-    # ── 定时检查 ──────────────────────────────────────────────────────────────
+            self._start_cooldown(ms, self.cfg.maker_cooldown)    # ── 定时检查 ──────────────────────────────────────────────────────────────
     def _check_cooldowns(self, now: float):
         for token_id, ms in list(self._markets.items()):
             if ms.state == ActorState.COOLING and now >= ms.cooldown_until:
@@ -367,7 +346,7 @@ class Guardian:
                                    token_id[:16], self.cfg.maker_rank)
                     self._start_cooldown(ms, 10.0)
                 else:
-                    logger.info("[STATE] %s PLACING target=%s", token_id[:16], target)
+                    logger.debug("[STATE] %s PLACING target=%s", token_id[:16], target)
                     fut = self.exec_layer.place(token_id, target,
                                                 self.cfg.maker_size, self.cfg.tick_size)
                     self._pending_ops.append((fut, token_id, "place", {"price": target}))
@@ -420,9 +399,9 @@ class Guardian:
             ms = self._markets.get(token_id)
             if ms and ms.active_id:
                 if ms.state is ActorState.CANCELING or self._has_pending_op(token_id):
-                    logger.info("[SYNC] %s 正在撤单中，延后移除", token_id[:20])
+                    logger.debug("[SYNC] %s 正在撤单中，延后移除", token_id[:20])
                     continue
-                logger.info("[SYNC] 市场已从文件移除，停止监控 %s", token_id[:20])
+                logger.debug("[SYNC] 市场已从文件移除，停止监控 %s", token_id[:20])
                 self._trigger_cancel(token_id, "从CSV移除")
                 ms.active_id = None
                 ms.active_price = None
@@ -432,7 +411,7 @@ class Guardian:
         # 新增：CSV 中新出现的市场
         for token_id, title in targets:
             if token_id not in self._markets:
-                logger.info("[SYNC] 新市场 %s | %s", token_id[:20], title[:50])
+                logger.debug("[SYNC] 新市场 %s | %s", token_id[:20], title[:50])
                 ms = MarketState()
                 self._markets[token_id] = ms
                 stagger = random.uniform(self.cfg.cooldown_delay, 30.0)
@@ -450,12 +429,12 @@ class Guardian:
         for tid in stopped:
             self._markets.pop(tid, None)
             self._file_managed_ids.discard(tid)
-            logger.info("[DISCOVER] 清理 STOPPED 市场 %s", tid[:20])
+            logger.debug("[DISCOVER] 清理 STOPPED 市场 %s", tid[:20])
 
         # 发现新市场（已有挂单）
         for tid in set(buys.keys()) - set(self._markets.keys()):
             o = buys[tid]
-            logger.info("[DISCOVER] 新市场 %s price=%s", tid[:20], o.price)
+            logger.debug("[DISCOVER] 新市场 %s price=%s", tid[:20], o.price)
             self._markets[tid] = MarketState(
                 state=ActorState.RESTING,
                 state_at=now,
@@ -466,7 +445,7 @@ class Guardian:
         # 从 CSV 文件同步
         self._sync_from_file()
 
-        logger.info("[DISCOVER] 守护 %d 个市场", len(self._markets))
+        logger.debug("[DISCOVER] 守护 %d 个市场", len(self._markets))
 
     # ── 批量轮询最佳买价 ──────────────────────────────────────────────────────
     def _poll_best_bids(self):
@@ -516,7 +495,7 @@ class Guardian:
                 if ms.best_bid is None:
                     ms.best_bid = new_bid
                     ms.best_ask = new_ask
-                    logger.info("[BID INIT] %s best_bid=%s", aid[:16], new_bid)
+                    logger.debug("[BID INIT] %s best_bid=%s", aid[:16], new_bid)
                     polled += 1
                     continue
 
@@ -525,7 +504,7 @@ class Guardian:
 
                 ms.best_bid = new_bid
                 ms.best_ask = new_ask
-                logger.info("[BID] %s best_bid=%s state=%s", aid[:16], new_bid, ms.state.name)
+                logger.debug("[BID] %s best_bid=%s state=%s", aid[:16], new_bid, ms.state.name)
                 polled += 1
 
                 if ms.state is ActorState.RESTING:
@@ -566,7 +545,7 @@ class Guardian:
 
     # ── 审计 ──────────────────────────────────────────────────────────────────
     def audit(self):
-        logger.info("[AUDIT] 开始...")
+        logger.debug("[AUDIT] 开始...")
         orders = self.open_orders()
         order_map = {o.order_id: o for o in orders}
         buys = [o for o in orders if o.side.upper() == "BUY"]
@@ -636,7 +615,7 @@ class Guardian:
 
         if overpriced:
             self._batch_cancel(overpriced, "审计纠偏")
-        logger.info("[AUDIT] 完成 %d 买单检查 | 纠偏 %d 个", len(buys), len(overpriced))
+        logger.debug("[AUDIT] 完成 %d 买单检查 | 纠偏 %d 个", len(buys), len(overpriced))
 
     # ── 交易处理 ──────────────────────────────────────────────────────────────
     def handle_trade(self, data: dict):
@@ -650,8 +629,6 @@ class Guardian:
         with self._trade_lock:
             if tid in self._processed_trades:
                 return
-
-        logger.info("[TRADE] id=%s status=%s side=%s", tid[:16], status, side)
 
         if not asset_id or status != "CONFIRMED":
             return
@@ -703,7 +680,7 @@ class Guardian:
         orders = self.open_orders()
         sell_tokens = {o.token_id for o in orders if o.side.upper() == "SELL"}
 
-        logger.info("[POSITION] 发现 %d 个持仓", len(pos_list))
+        logger.debug("[POSITION] 发现 %d 个持仓", len(pos_list))
         placed = 0
         for p in pos_list:
             tid = p.get("asset", "")
@@ -723,9 +700,8 @@ class Guardian:
                 if bal <= self.cfg.position_threshold:
                     continue
 
-                logger.info("[MARKET SELL] %s | %.4f shares",
+                logger.info("[MARKET SELL] %s | %.4f shares @ market",
                             p.get("title", "未知")[:40], bal)
-
                 fut = self.exec_layer.market_sell(tid, bal, self.cfg.tick_size)
                 try:
                     sell_oid = fut.result(timeout=self.cfg.place_timeout)
@@ -746,7 +722,7 @@ class Guardian:
                             "size": bal, "type": "MARKET_FOK",
                         },
                     }, ensure_ascii=False))
-                    logger.info("[MARKET SELL OK] %s id=%s", tid[:20], str(sell_oid)[:20])
+                    logger.info("[MARKET SELL FILLED] %s id=%s", tid[:20], str(sell_oid)[:20])
                     placed += 1
                 else:
                     logger.error("[MARKET SELL FAIL] %s 市价卖单失败", tid[:20])
@@ -757,7 +733,7 @@ class Guardian:
             time.sleep(0.3)
 
         if placed:
-            logger.info("[POSITION] 市价卖出 %d 个", placed)
+            logger.info("[POSITION] 市价卖出 %d 个持仓", placed)
 
     # ── 缓存清理 ──────────────────────────────────────────────────────────────
     def _prune_caches(self):

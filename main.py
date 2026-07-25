@@ -8,10 +8,14 @@ import io
 import logging
 import os
 import sys
+import warnings
 
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
+
+# 屏蔽第三方库的版本兼容警告等噪音
+warnings.filterwarnings("ignore")
 
 from config import Config
 from guardian import Guardian
@@ -32,6 +36,12 @@ logging.basicConfig(
 # 降低第三方库日志噪音
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("websocket").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("py_clob_client_v2").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
+logging.getLogger("charset_normalizer").setLevel(logging.WARNING)
+logging.getLogger("requests.packages.urllib3").setLevel(logging.WARNING)
 
 
 def main():
