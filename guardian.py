@@ -716,6 +716,23 @@ class Guardian:
         if not pos_list:
             return
 
+        # 批量查询所有持仓的 best_bid，避免在订单簿被扫空时市价卖出滑点过大
+        best_bid_map: Dict[str, Decimal] = {}
+        for chunk in self._chunk_list([p["asset"] for p in pos_list if p.get("asset")], 500):
+            try:
+                r = requests.post(
+                    f"{self.cfg.host}/books",
+                    json=[{"token_id": tid} for tid in chunk],
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    for item in r.json():
+                        bids = item.get("bids", [])
+                        if bids:
+                            best_bid_map[item["asset_id"]] = Decimal(bids[-1].get("price", "0"))
+            except Exception as e:
+                logger.error("[POSITION] 批量查询 best_bid 失败: %s", e)
+
         orders = self.open_orders()
         sell_tokens = {o.token_id for o in orders if o.side.upper() == "SELL"}
 
@@ -728,6 +745,16 @@ class Guardian:
 
             if tid in sell_tokens:
                 continue
+
+            # best_bid 太低则跳过（保护卖出价格不因订单簿短暂空缺而受损）
+            bb = best_bid_map.get(tid)
+            entry = safe_float(p.get("avgPrice", 0))
+            if bb is not None and entry > 0:
+                min_bid = Decimal(str(entry)) - self.cfg.sell_min_bid_gap
+                if bb < min_bid:
+                    logger.warning("[POSITION] %s best_bid=%s < 成本%.4f-%.2f=%.4f，跳过卖出",
+                                  tid[:16], bb, entry, self.cfg.sell_min_bid_gap, min_bid)
+                    continue
 
             with self._sell_lock:
                 if tid in self._selling:

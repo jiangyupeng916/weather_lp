@@ -69,6 +69,7 @@ class Config:
 
     # ── 持仓卖出阈值 ──────────────────────────────────────────────────────────
     position_threshold: float = 1.0
+    sell_min_bid_gap: Decimal = Decimal("0.05")  # best_bid 低于成本价-此值则跳过卖出
 
     # ── WebSocket 连接 ────────────────────────────────────────────────────────
     ws_reconnect_delay: float = 5.0
