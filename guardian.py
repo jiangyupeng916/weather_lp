@@ -210,31 +210,35 @@ class Guardian:
     def _batch_cancel(self, token_ids: List[str], reason: str = ""):
         """收集 market state 中的 active_id，批量发 DELETE /orders。"""
         order_ids = []
+        # 保持 token_id 与 order_id 一一对应，供 _handle_batch_cancel_result 回写状态
+        tid_oid_pairs: List[Tuple[str, str]] = []
         for tid in token_ids:
             ms = self._markets.get(tid)
             if ms and ms.active_id and ms.state is not ActorState.CANCELING:
-                order_ids.append(ms.active_id)
+                oid = ms.active_id
+                order_ids.append(oid)
+                tid_oid_pairs.append((tid, oid))
                 ms.state = ActorState.CANCELING
                 ms.state_at = time.time()
         if order_ids:
             logger.debug("[BATCH CANCEL] 批量撤单 %d 个 | %s", len(order_ids), reason)
             fut = self.exec_layer.cancel_batch(order_ids, reason)
             self._pending_ops.append((fut, "_batch_", "cancel_batch",
-                                      {"order_ids": order_ids, "reason": reason}))
+                                      {"tid_oid_pairs": tid_oid_pairs, "reason": reason}))
 
-    def _handle_batch_cancel_result(self, token_ids: List[str], reason: str,
-                                      result: dict):
+    def _handle_batch_cancel_result(self, tid_oid_pairs: List[Tuple[str, str]],
+                                      reason: str, result: dict):
         """根据批量撤单结果更新状态：成功的进入冷却，失败的也进入冷却（让 audit/poll 下轮重查）。
 
         失败分支也进入冷却而非回退 RESTING，避免 SDK 返回 id 格式不一致时
         形成死循环。同时清空 active_id，让下一轮 poll/audit 重新发现真实状态。
         """
         canceled_set = set(result.get("canceled", []))
-        for tid in token_ids:
+        for tid, oid in tid_oid_pairs:
             ms = self._markets.get(tid)
             if not ms or ms.state is not ActorState.CANCELING:
                 continue
-            if ms.active_id in canceled_set:
+            if oid in canceled_set:
                 logger.debug("[BATCH CANCEL] %s 取消成功", tid[:16])
             else:
                 logger.error("[BATCH CANCEL] %s 取消失败，清空 active_id 进入冷却兜底",
@@ -258,10 +262,22 @@ class Guardian:
 
     # ── 异步结果处理 ──────────────────────────────────────────────────────────
     def _has_pending_op(self, token_id: str) -> bool:
-        """检查该 token 是否有未完成的异步操作。"""
-        for fut, tid, _op, _meta in self._pending_ops:
-            if tid == token_id and not fut.done():
+        """检查该 token 是否有未完成的异步操作（含批量撤单中的订单）。"""
+        ms = self._markets.get(token_id)
+        active_id = ms.active_id if ms else None
+        for fut, tid, op, meta in self._pending_ops:
+            if fut.done():
+                continue
+            if tid == token_id:
                 return True
+            # 批量撤单 Future 用 "_batch_" 占位，需检查 tid_oid_pairs 中的 token_id
+            if op == "cancel_batch":
+                pairs = meta.get("tid_oid_pairs") or []
+                for p_tid, p_oid in pairs:
+                    if p_tid == token_id:
+                        return True
+                    if active_id and p_oid == active_id:
+                        return True
         return False
 
     def _handle_cancel_result(self, ms: MarketState, token_id: str, ok: bool,
@@ -300,7 +316,9 @@ class Guardian:
             ms.state = ActorState.NO_ORDER
             ms.state_at = time.time()
             self.exec_layer.clear_place(token_id, price)
-            self._start_cooldown(ms, self.cfg.maker_cooldown)    # ── 定时检查 ──────────────────────────────────────────────────────────────
+            self._start_cooldown(ms, self.cfg.maker_cooldown)
+
+    # ── 定时检查 ──────────────────────────────────────────────────────────────
     def _check_cooldowns(self, now: float):
         for token_id, ms in list(self._markets.items()):
             if ms.state == ActorState.COOLING and now >= ms.cooldown_until:
@@ -312,25 +330,21 @@ class Guardian:
             if not fut.done():
                 continue
             completed.append(i)
-            ms = self._markets.get(token_id)
-            if not ms:
-                continue
 
             try:
                 result = fut.result(timeout=0)
             except Exception:
                 result = False if op == "cancel" else None
 
-            if op == "cancel":
-                self._handle_cancel_result(ms, token_id, bool(result),
-                                            meta["order_id"], meta.get("reason", ""))
-            elif op == "cancel_batch":
+            # 批量撤单特殊处理：token_id 是 "_batch_" 占位符，无法用 _markets.get 查 ms
+            if op == "cancel_batch":
+                pairs = meta.get("tid_oid_pairs") or []
                 if isinstance(result, dict):
-                    self._handle_batch_cancel_result(meta["order_ids"],
+                    self._handle_batch_cancel_result(pairs,
                                                       meta.get("reason", ""), result)
                 else:
                     # 批量撤单异常：统一清空 active_id 进入冷却兜底
-                    for tid in meta["order_ids"]:
+                    for tid, _oid in pairs:
                         ms_sub = self._markets.get(tid)
                         if ms_sub and ms_sub.state is ActorState.CANCELING:
                             ms_sub.active_id = None
@@ -338,6 +352,15 @@ class Guardian:
                             ms_sub.state = ActorState.NO_ORDER
                             ms_sub.state_at = time.time()
                             self._start_cooldown(ms_sub, self.cfg.maker_cooldown)
+                continue
+
+            ms = self._markets.get(token_id)
+            if not ms:
+                continue
+
+            if op == "cancel":
+                self._handle_cancel_result(ms, token_id, bool(result),
+                                            meta["order_id"], meta.get("reason", ""))
             elif op == "target_price":
                 # Step 2: 拿到订单簿价格后，提交实际下单
                 target = result
@@ -576,10 +599,23 @@ class Guardian:
                 logger.debug("[AUDIT] %s 有 pending 操作，跳过", token_id[:16])
                 continue
 
-            # 卡死的 PLACING/CANCELING 状态重置
-            if ms.state in (ActorState.CANCELING, ActorState.PLACING) \
+            # CANCELING 兜底重置：仅当 Future 已完成但状态未被回写时（异常路径）
+            if ms.state == ActorState.CANCELING \
                     and (now - ms.state_at) > self.cfg.stale_timeout:
-                logger.warning("[AUDIT] %s %s 超时重置", token_id[:16], ms.state.name)
+                logger.warning("[AUDIT] %s CANCELING Future 完成但状态未回写，兜底重置",
+                               token_id[:16])
+                self.exec_layer.clear_place_by_asset(token_id)
+                ms.active_id = None
+                ms.active_price = None
+                ms.state = ActorState.NO_ORDER
+                ms.state_at = now
+                self._start_cooldown(ms, self.cfg.maker_cooldown)
+                continue
+
+            # PLACING 卡死重置
+            if ms.state == ActorState.PLACING \
+                    and (now - ms.state_at) > self.cfg.stale_timeout:
+                logger.warning("[AUDIT] %s PLACING 超时重置", token_id[:16])
                 self.exec_layer.clear_place_by_asset(token_id)
                 ms.active_id = None
                 ms.active_price = None
