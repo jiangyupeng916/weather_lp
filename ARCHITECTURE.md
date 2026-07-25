@@ -170,9 +170,21 @@ check_positions() 每 120s 执行：
 
 **三层容错策略**：
 1. 优先 SDK `client.post_heartbeat()`
-2. SDK 失败 → 从错误消息正则提取 `heartbeat_id` → 回退 L2 认证头直接 HTTP
-3. 400 响应 → 提取正确 ID，更新后重试；401/403 → 直接抛出
-4. 连续失败 ≥3 次 → CRITICAL 告警
+2. SDK 抛异常 → 从 `PolyApiException.error_msg` (dict) 中提取新 `heartbeat_id`，兼容字符串正则回退
+3. 恢复到新 id → **立即用新 id 重试 SDK**（成功则免走 raw fallback）
+4. SDK 重试仍失败 → 回退 L2 认证头直接 HTTP (`_raw_heartbeat`)，签名算法与 SDK 完全一致：
+   - secret 用 `base64.urlsafe_b64decode` 解码
+   - 消息串 = `ts + method + path + str(body).replace("'", '"')`
+   - 输出 = `base64.urlsafe_b64encode(HMAC-SHA256 digest)`
+   - HTTP body 使用同一 `str(body).replace` 字符串（服务器按接收字节验签）
+5. raw 400 响应 → 提取正确 ID，更新后循环重试；401/403 → 抛出
+6. 失败重试节奏：连续失败但未到阈值时 1s 快速重试；成功或已到阈值按 `heartbeat_interval`（7s）
+7. 连续失败 ≥`heartbeat_max_errors` 次 → CRITICAL 告警
+
+**V7.6 修复的三处 heartbeat bug**（一直存在，从未修过）：
+- Bug 1：旧 `_try_recover_sdk_error` 用双引号正则匹配 `str(e)`，但 Python dict repr 用单引号 → 从未成功恢复过一次
+- Bug 2：旧 `_raw_heartbeat` 签名用 `.encode()` / `json.dumps` / `hexdigest`，三处都与 SDK 不一致 → fallback 一直 401
+- Bug 3：旧代码恢复到新 id 后直接走 raw（Bug 2 必然失败），未先用新 id 重试 SDK
 
 **生命周期**：启动时最先 start，关闭时最后 stop（确保订单存活窗口覆盖全部运行时间）。
 
@@ -439,7 +451,33 @@ WS CANCELLATION 事件不再处理（仅记录 debug 日志）。撤单完全由
 - Post-Only：BUY 下单 `post_only=True`，绝对纯 Maker，跨价拒绝不重试
 - CSV 空 token_id 自动跳过（可临时排除特定市场）
 
-### V7.5（2026-07-24）：重复挂单根因修复（流程级防护）
+### V7.6（2026-07-25）：Heartbeat 恢复机制修复 + audit race 修复
+
+**根因**：日志显示 195 张订单在同一秒内被 audit 标记"订单丢失纠偏"。表面是 audit 检测到 RESTING 订单不在 open_orders 中；深层是心跳中断 85+ 秒，交易所超过宽限期自动撤销挂单。
+
+**P0：SDK 400 后 heartbeat_id 恢复失败** — `heartbeat.py:_try_recover_sdk_error`
+- 旧正则 `r'"heartbeat_id"\s*:\s*"([a-f0-9-]+)"'` 期待双引号，但 SDK `PolyApiException.error_msg` 是 dict，`str(e)` 中 Python dict repr 使用**单引号** → 永不匹配
+- 改为优先读 `getattr(e, "error_msg", None)`（dict）中的 `heartbeat_id`；字符串正则兼容单/双引号作为回退
+
+**P0：raw fallback 签名与 SDK 不一致** — `heartbeat.py:_raw_heartbeat`
+- 旧代码：`self._creds.api_secret.encode()` / `json.dumps(body, separators=(",",":"))` / `.hexdigest()` — 三处都与 SDK 不同
+- SDK 签名（`py_clob_client_v2.signing.hmac.build_hmac_signature`）：`base64.urlsafe_b64decode(secret)` / `str(body).replace("'", '"')` / `base64.urlsafe_b64encode(digest)`
+- 改为直接复用 `build_hmac_signature`，HTTP body 也用 `str(body).replace("'", '"')` 保持与签名字节一致
+
+**P1：恢复后未立即用新 id 重试 SDK** — `heartbeat.py:_send_heartbeat`
+- 旧代码 recover 后直接走 raw fallback（依赖 Bug 2 那条必然失败的路径）
+- 改为 recover 成功后立即用新 id 再打一次 SDK，仍失败才走 raw
+
+**P1：失败重试节奏过慢** — `heartbeat.py:_loop`
+- 旧代码始终 `sleep(heartbeat_interval)` （7s），失败后 7s 才重试，短时抖动被放大成心跳中断
+- 改为：失败但未达阈值时 `sleep(1.0)` 快速重试；成功或已达阈值按 `heartbeat_interval`
+
+**P1：audit 误判已完成但未回写的 Future** — `guardian.py:_has_pending_op`
+- 旧代码遍历 `_pending_ops` 时 `if fut.done(): continue`，跳过已完成但主循环尚未在 `_check_pending_ops` 中回写状态的 Future
+- 后果：audit 抢在 `_check_pending_ops` 前跑（同一主循环迭代内），把 PLACING/CANCELING 市场当成卡死并重置；随后 `_handle_*_result` 又将状态写回，产生错位
+- 修复：只要 op 还在 `_pending_ops` 列表里就视为 pending，不判断 `fut.done()`（`_check_pending_ops` 会在弹出前处理完成的 Future）
+
+
 
 针对"同一市场出现 2 个活跃订单"的根因做修复，**不依赖事后发现**：
 

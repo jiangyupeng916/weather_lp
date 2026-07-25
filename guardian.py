@@ -262,12 +262,15 @@ class Guardian:
 
     # ── 异步结果处理 ──────────────────────────────────────────────────────────
     def _has_pending_op(self, token_id: str) -> bool:
-        """检查该 token 是否有未完成的异步操作（含批量撤单中的订单）。"""
+        """检查该 token 是否有未完成的异步操作（含批量撤单中的订单）。
+
+        注意：不能因为 fut.done() 就跳过 —— Future 完成但主循环尚未在
+        _check_pending_ops 中回写状态时，audit 会误判该市场处于卡死状态
+        并触发不必要的重置。只要 op 还在 _pending_ops 里就视为 pending。
+        """
         ms = self._markets.get(token_id)
         active_id = ms.active_id if ms else None
         for fut, tid, op, meta in self._pending_ops:
-            if fut.done():
-                continue
             if tid == token_id:
                 return True
             # 批量撤单 Future 用 "_batch_" 占位，需检查 tid_oid_pairs 中的 token_id

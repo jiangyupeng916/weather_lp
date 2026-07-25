@@ -11,7 +11,6 @@ CLOB API 要求每 ~10 秒发送心跳，否则所有未成交订单被自动取
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
@@ -69,7 +68,12 @@ class HeartbeatManager:
                         "[HEARTBEAT] 连续失败 %d 次！订单将在 ~%d 秒后被交易所自动取消！",
                         self._error_count, self._cfg.heartbeat_interval,
                     )
-            time.sleep(self._cfg.heartbeat_interval)
+            # 失败但未达阈值时快速重试（不超过 1s 且不超过 heartbeat_interval），
+            # 成功或已到阈值按正常间隔
+            if 0 < self._error_count < self._cfg.heartbeat_max_errors:
+                time.sleep(min(1.0, self._cfg.heartbeat_interval))
+            else:
+                time.sleep(self._cfg.heartbeat_interval)
 
     def _send_heartbeat(self):
         # 优先使用 SDK
@@ -79,8 +83,18 @@ class HeartbeatManager:
             logger.debug("[HEARTBEAT] OK id=%s", str(self._heartbeat_id)[:16])
             return
         except Exception as e:
-            # 尝试从 SDK 错误中恢复 heartbeat_id（SDK 400 响应体包含正确 ID）
-            self._try_recover_sdk_error(e)
+            # 从 SDK 错误恢复 heartbeat_id（SDK 400 响应体包含正确 ID）
+            recovered = self._try_recover_sdk_error(e)
+            # 恢复到新 id → 立即用新 id 重试 SDK，避免走 raw fallback 的复杂签名路径
+            if recovered:
+                try:
+                    resp = self._client.post_heartbeat(self._heartbeat_id)
+                    self._update_id(resp)
+                    logger.info("[HEARTBEAT] OK (recovered) id=%s",
+                                str(self._heartbeat_id)[:16])
+                    return
+                except Exception:
+                    pass  # 仍失败则走 raw fallback
 
         # SDK 失败 → 回退到原始 REST（L2 认证头）
         try:
@@ -92,22 +106,34 @@ class HeartbeatManager:
         except Exception:
             raise
 
-    def _try_recover_sdk_error(self, e: Exception):
-        """从 SDK 异常中尝试提取 heartbeat_id。
-        SDK 在收到 400 时会在日志/异常中暴露响应体 {"heartbeat_id":"xxx","error_msg":"..."}
+    def _try_recover_sdk_error(self, e: Exception) -> bool:
+        """从 SDK 异常中尝试提取 heartbeat_id，返回是否恢复成功。
+
+        SDK PolyApiException 在 400 时 error_msg 属性直接是 resp.json() 得到的 dict
+        (见 py_clob_client_v2/exceptions.py)。之前用正则匹配 str(e)，Python dict repr
+        使用单引号 → 双引号正则永不匹配。改为优先读 error_msg 属性，字符串正则作回退。
         """
-        import re
-        msg = str(e)
-        m = re.search(r'"heartbeat_id"\s*:\s*"([a-f0-9-]+)"', msg)
-        if m:
-            new_id = m.group(1)
-            with self._lock:
-                old = self._heartbeat_id
-                self._heartbeat_id = new_id
-            logger.info(
-                "[HEARTBEAT] 从 SDK 错误恢复 heartbeat_id: %s (旧: %s)",
-                new_id[:16], old[:16] if old else "空",
-            )
+        # 优先：从 PolyApiException.error_msg (dict) 结构化提取
+        error_msg = getattr(e, "error_msg", None)
+        new_id = ""
+        if isinstance(error_msg, dict):
+            new_id = str(error_msg.get("heartbeat_id", "") or "")
+        # 回退：字符串正则兼容单/双引号
+        if not new_id:
+            import re
+            m = re.search(r"""['"]heartbeat_id['"]\s*:\s*['"]([a-f0-9-]+)['"]""", str(e))
+            if m:
+                new_id = m.group(1)
+        if not new_id:
+            return False
+        with self._lock:
+            old = self._heartbeat_id
+            self._heartbeat_id = new_id
+        logger.info(
+            "[HEARTBEAT] 从 SDK 错误恢复 heartbeat_id: %s (旧: %s)",
+            new_id[:16], old[:16] if old else "空",
+        )
+        return True
 
     def _handle_http_error(self, e: requests.HTTPError):
         """处理 HTTP 错误响应。
@@ -144,22 +170,27 @@ class HeartbeatManager:
             self._heartbeat_id = new_id or self._heartbeat_id
 
     def _raw_heartbeat(self) -> dict:
-        """使用 L2 认证头直接请求心跳端点。"""
-        import hmac
-        import hashlib
+        """使用 L2 认证头直接请求心跳端点。签名必须与 SDK 完全一致
+        (py_clob_client_v2.signing.hmac.build_hmac_signature)：
+         - secret: base64.urlsafe_b64decode
+         - 消息:   ts + method + path + str(body).replace("'", '"')
+         - 输出:   base64.urlsafe_b64encode(HMAC-SHA256 digest)
+        之前用 .encode() / json.dumps / hexdigest，三处都与 SDK 不一致，
+        fallback 从初始化那天起一直 401。
+        """
+        from py_clob_client_v2.signing.hmac import build_hmac_signature
 
         path = "/v1/heartbeats"
         url = f"{self._cfg.host}{path}"
         body = {"heartbeat_id": self._heartbeat_id}
-        serialized = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+        # SDK 用 str(body).replace("'", '"') 作签名 body，HTTP body 必须完全一致
+        # （服务器会按接收到的 body 字节重新计算签名）
+        body_for_sig = str(body).replace("'", '"')
 
         ts = str(int(datetime.now(timezone.utc).timestamp()))
-        sig_msg = ts + "POST" + path + serialized
-        signature = hmac.new(
-            self._creds.api_secret.encode(),
-            sig_msg.encode(),
-            hashlib.sha256,
-        ).hexdigest()
+        signature = build_hmac_signature(
+            self._creds.api_secret, ts, "POST", path, body_for_sig,
+        )
 
         headers = {
             "Content-Type": "application/json",
@@ -169,6 +200,6 @@ class HeartbeatManager:
             "POLY_API_KEY": self._creds.api_key,
             "POLY_PASSPHRASE": self._creds.api_passphrase,
         }
-        r = requests.post(url, headers=headers, data=serialized, timeout=10)
+        r = requests.post(url, headers=headers, data=body_for_sig, timeout=10)
         r.raise_for_status()
         return r.json()
