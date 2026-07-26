@@ -543,7 +543,7 @@ class Guardian:
                     m.yes_token_id if yes_ok else "",
                     m.no_token_id if no_ok else "",
                 ])
-        _os.replace(csv_tmp, csv_path)
+        os.replace(csv_tmp, csv_path)
 
     # ── 订单发现 ──────────────────────────────────────────────────────────────
     def discover(self):
