@@ -257,6 +257,35 @@ class ExecutionLayer:
                 return o.get("id") or o.get("order_id")
         return None
 
+    # ── 限价卖单 ────────────────────────────────────────────────────────────
+    def limit_sell(self, asset_id: str, size: float, price: Decimal, tick_size: Decimal) -> Future:
+        """异步限价卖出，返回 Future[Optional[str]]（order_id 或 None）。"""
+        fut: Future = Future()
+        self._executor.submit(self._do_limit_sell, asset_id, size, price, tick_size, fut)
+        return fut
+
+    def _do_limit_sell(self, asset_id: str, size: float, price: Decimal, tick_size: Decimal, fut: Future):
+        price_f = safe_float_from_decimal(price)
+        self._rate_wait()
+        try:
+            res = self._client.create_and_post_order(
+                order_args=OrderArgs(
+                    token_id=asset_id,
+                    price=price_f,
+                    size=size,
+                    side="SELL",
+                ),
+                options=PartialCreateOrderOptions(tick_size=str(tick_size)),
+            )
+            order_id = res.get("orderID") or res.get("order_id")
+            logger.debug("[LIMIT SELL OK] %s... price=%s size=%s id=%s",
+                        asset_id[:16], price, size, str(order_id)[:20] if order_id else "N/A")
+            fut.set_result(order_id)
+        except Exception as e:
+            logger.error("[LIMIT SELL FAIL] %s... price=%s size=%s | %s",
+                         asset_id[:16], price, size, e)
+            fut.set_result(None)
+
     # ── 市价卖单（FOK） ─────────────────────────────────────────────────────
     def market_sell(self, asset_id: str, size: float, tick_size: Decimal) -> Future:
         """异步市价卖出（FOK，全成或全撤），返回 Future[Optional[str]]（order_id 或 None）。

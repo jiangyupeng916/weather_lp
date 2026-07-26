@@ -380,6 +380,13 @@ class Guardian:
                 success = result is not None
                 self._handle_place_result(ms, token_id, success,
                                            result if success else None, meta["price"])
+            elif op == "limit_sell":
+                if result:
+                    logger.debug("[LIMIT SELL] %s 卖单已挂 id=%s price=%s",
+                                token_id[:16], str(result)[:20], meta.get("price"))
+                else:
+                    logger.error("[LIMIT SELL] %s 卖单失败 price=%s",
+                                token_id[:16], meta.get("price"))
 
         for i in reversed(completed):
             self._pending_ops.pop(i)
@@ -716,7 +723,7 @@ class Guardian:
         if not pos_list:
             return
 
-        # 批量查询所有持仓的 best_bid，避免在订单簿被扫空时市价卖出滑点过大
+        # 批量查询所有持仓的 best_bid
         best_bid_map: Dict[str, Decimal] = {}
         for chunk in self._chunk_list([p["asset"] for p in pos_list if p.get("asset")], 500):
             try:
@@ -734,7 +741,9 @@ class Guardian:
                 logger.error("[POSITION] 批量查询 best_bid 失败: %s", e)
 
         orders = self.open_orders()
-        sell_tokens = {o.token_id for o in orders if o.side.upper() == "SELL"}
+        # {token_id: (order_id, price)} — 用于判断是否需要更新卖价
+        sell_map = {o.token_id: (o.order_id, safe_decimal(o.price))
+                    for o in orders if o.side.upper() == "SELL"}
 
         logger.debug("[POSITION] 发现 %d 个持仓", len(pos_list))
         placed = 0
@@ -743,18 +752,27 @@ class Guardian:
             if not tid:
                 continue
 
-            if tid in sell_tokens:
-                continue
-
-            # best_bid 太低则跳过（保护卖出价格不因订单簿短暂空缺而受损）
             bb = best_bid_map.get(tid)
+            if bb is None:
+                continue
             entry = safe_float(p.get("avgPrice", 0))
-            if bb is not None and entry > 0:
+
+            # best_bid 太低 → 取消现有卖单，等下一轮
+            if entry > 0:
                 min_bid = Decimal(str(entry)) - self.cfg.sell_min_bid_gap
                 if bb < min_bid:
-                    logger.warning("[POSITION] %s best_bid=%s < 成本%.4f-%.2f=%.4f，跳过卖出",
-                                  tid[:16], bb, entry, self.cfg.sell_min_bid_gap, min_bid)
+                    existing = sell_map.get(tid)
+                    if existing:
+                        logger.warning(
+                            "[POSITION] %s best_bid=%s < 成本%.4f-%.2f=%.4f，取消卖单等待",
+                            tid[:16], bb, entry, self.cfg.sell_min_bid_gap, min_bid)
+                        self.exec_layer.cancel(existing[0], "best_bid过低取消卖单")
                     continue
+
+            # 已有卖单且价格相同 → 跳过
+            existing = sell_map.get(tid)
+            if existing and existing[1] == bb:
+                continue
 
             with self._sell_lock:
                 if tid in self._selling:
@@ -766,40 +784,23 @@ class Guardian:
                 if bal <= self.cfg.position_threshold:
                     continue
 
-                logger.info("[MARKET SELL] %s | %.4f shares @ market",
-                            p.get("title", "未知")[:40], bal)
-                fut = self.exec_layer.market_sell(tid, bal, self.cfg.tick_size)
-                try:
-                    sell_oid = fut.result(timeout=self.cfg.place_timeout)
-                except Exception:
-                    sell_oid = None
+                # 价格变了 → 撤旧卖单
+                if existing:
+                    logger.info("[LIMIT SELL] %s 更新卖价 %s → %s",
+                               tid[:16], existing[1], bb)
+                    self.exec_layer.cancel(existing[0], "更新卖价")
 
-                if sell_oid:
-                    trade_logger.info(json.dumps({
-                        "buy": {
-                            "token_id": tid, "side": "BUY",
-                            "size": bal,
-                            "price": safe_float(p.get("avgPrice", 0)),
-                            "title": p.get("title", ""), "outcome": p.get("outcome", ""),
-                            "source": "polling",
-                        },
-                        "sell": {
-                            "order_id": sell_oid, "token_id": tid, "side": "SELL",
-                            "size": bal, "type": "MARKET_FOK",
-                        },
-                    }, ensure_ascii=False))
-                    logger.info("[MARKET SELL FILLED] %s id=%s", tid[:20], str(sell_oid)[:20])
-                    placed += 1
-                else:
-                    logger.error("[MARKET SELL FAIL] %s 市价卖单失败", tid[:20])
+                logger.info("[LIMIT SELL] %s | %.4f shares @ %s",
+                           p.get("title", "未知")[:40], bal, bb)
+                fut = self.exec_layer.limit_sell(tid, bal, bb, self.cfg.tick_size)
+                self._pending_ops.append((fut, tid, "limit_sell", {"price": bb}))
+                placed += 1
             finally:
                 with self._sell_lock:
                     self._selling.discard(tid)
 
-            time.sleep(0.3)
-
         if placed:
-            logger.info("[POSITION] 市价卖出 %d 个持仓", placed)
+            logger.info("[POSITION] 限价卖出 %d 个持仓", placed)
 
     # ── 缓存清理 ──────────────────────────────────────────────────────────────
     def _prune_caches(self):
