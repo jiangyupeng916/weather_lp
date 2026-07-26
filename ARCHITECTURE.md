@@ -33,6 +33,11 @@ utils.py    ← 无内部依赖（纯函数工具）
     │
     ├── ws_router.py   ← config (Guardian via TYPE_CHECKING)
     │
+    ├── screener/      ← 内置筛选器子包
+    │   ├── types.py   ← 数据类 (CandidateMarket, ScoredMarket)
+    │   ├── markets.py ← config (fetcher 接受 Config 对象)
+    │   └── clob.py    ← config + types (评分 + 批量查订单簿)
+    │
     └── guardian.py    ← 以上全部
             │
         main.py        ← config, guardian
@@ -51,27 +56,33 @@ utils.py    ← 无内部依赖（纯函数工具）
                   └────────────────┘  └────────┬──────────┘
                                                │ Future
   ┌──────────────────┐          ┌──────────────┤
-  │ POST /books 轮询  │          │              │
-  │ (每3s 查best_bid) │  ┌───────▼──────────┐   │
-  │ 200 市场批量      │  │  WSRouter        │   │
+  │ screener/ 筛选器  │          │              │
+  │ (每30s内存直传)   │          │              │
+  │ /sampling-markets│  ┌───────▼──────────┐   │
+  │ + /books 批量评分 │  │  WSRouter        │   │
   └────────┬─────────┘  │  用户频道消息分发  │   │
            │             └──┬───────────────┘   │
            │                │          │         │
   ┌────────┼────────┐       │          │         │
-  │ User WS◄────────┼───────┘          │         │
-  │ trade 事件       │                  │         │
-  │ (MATCHED/       │     ┌────────────▼─────────▼──┐
-  │  CONFIRMED/     │     │ Guardian 主线程          │
-  │  FAILED)        │     │ discover(30s)           │
-  │ order 事件       │     │ poll(3s)               │
-  │ (PLACEMENT/     │     │ audit(120s)            │
-  │  CANCELLATION)  │     │ positions(120s)        │
-  └─────────────────┘     │ prune(300s)            │
-                          │ cooldown/pending(1s)  │
-                          │                        │
-                          │ Dict[str, MarketState]│
-                          │ (主线程直读直写，无锁)   │
-                          └────────────────────────┘
+  │ POST /books 轮询│       │          │         │
+  │ (每3s 查best_bid)│      │          │         │
+  │ 200 市场批量      │  ┌───┴──────────┴──┐      │
+  └────────┬─────────┘  │ User WS          │      │
+           │             │ trade 事件        │      │
+           │             │ (MATCHED/        │      │
+  ┌────────▼───────────▼─┴─CONFIRMED/FAILED)│      │
+  │     Guardian 主线程     │ order 事件      │      │
+  │     _run_screener(30s)│ (PLACEMENT/     │      │
+  │     discover(30s)     │  CANCELLATION)  │      │
+  │     poll(3s)          └─────────────────┘      │
+  │     audit(120s)                               │
+  │     positions(120s)                           │
+  │     prune(300s)                               │
+  │     cooldown/pending(1s)                      │
+  │                                               │
+  │     Dict[str, MarketState]                    │
+  │     (主线程直读直写，无锁)                      │
+  └───────────────────────────────────────────────┘
 ```
 
 ***
@@ -335,8 +346,40 @@ Guardian 每 3s 通过 `POST /books` 批量查询所有市场的订单簿，提�
 2. WS 启动 + 用户频道认证
 3. discover() — 发现已有订单
 4. 市场频道订阅
-5. 主循环（四定时任务）
+5. 主循环（五定时任务 + 筛选器）
 6. `_shutdown()`：取消活跃订单 → 停止 Actor → 断 WS → 停工线程池 → 停心跳
+
+### 3.9 screener/ — 内置筛选器子包
+
+**作用**：替代原先外部独立运行的筛选器进程。每 30s 从 CLOB `/sampling-markets` 拉取所有有返利奖励的市场，按订单簿深度计算 `reward_per_dollar` 评分，筛选后直接内存传递给 Guardian。
+
+**数据流**：
+```
+_run_screener() 每 30s:
+  1. markets.fetch_and_filter(cfg)        → List[CandidateMarket]
+      - GET /sampling-markets 分页拉取
+      - 过滤：active + rewards + 关键词 + 中点 + min_size
+  2. clob.analyze_orderbooks(candidates, cfg) → List[ScoredMarket]
+      - POST /books 批量查订单簿（≤500/批，5线程并发）
+      - 评分：reward_per_dollar = 日奖励 / (深度 + min_size)
+  3. 过滤 existing_total_size ≥ MIN_EXISTING_SIZE
+  4. _sync_from_screener(scored_list) → 直接更新 self._markets
+  5. 写入 data/screener_latest.csv（调试用，非数据桥）
+```
+
+**文件职责**：
+
+| 文件 | 职责 |
+|------|------|
+| `screener/types.py` | 数据类：CandidateMarket、ScoredMarket、AllocatedMarket |
+| `screener/markets.py` | `fetch_and_filter(cfg)` — 拉取+过滤候选市场 |
+| `screener/clob.py` | `analyze_orderbooks(candidates, cfg)` — 批量查订单簿+评分排序 |
+
+**与旧筛选器的区别**：
+- 不再是独立进程，作为 Guardian 内部定时任务运行
+- 接受 `Config` 对象参数，而非硬编码的模块级 `CONFIG` 单例
+- 结果直接内存传递，不再通过 CSV 文件中转
+- CSV 输出保留但仅为调试用途
 
 ***
 
@@ -511,6 +554,17 @@ WS CANCELLATION 事件不再处理（仅记录 debug 日志）。撤单完全由
 - 配置新增 `MARKET_FILE` 环境变量
 - LOGIC.md 删除已废弃的市场放弃逻辑章节、`data/abandons.log` 条目
 
+### V7.7（2026-07-26）：筛选器融合 + 配置统一
+
+- 将独立筛选器项目 `polymarket-liquidity-monitor-python/` 融合为 Guardian 内部子包 `screener/`
+- 筛选器作为 Guardian 定时任务 `_run_screener()` 每 30s 运行，结果直接内存传递（不再通过 CSV 中转）
+- 所有筛选器参数统一到 `config.py`，通过 `SCREENER_*` 环境变量配置
+- CSV 输出保留为 `data/screener_latest.csv`（仅调试用，非数据桥）
+- 废弃代码删除：`allocator.py`（未使用且已损坏）、独立 `screener.py` 入口
+- `screener/markets.py` 和 `screener/clob.py` 改为接受 `Config` 对象参数
+- 删除 `MARKET_FILE` 环境变量（不再需要外部 CSV 输入）
+- 筛选器间隔：原 1min → 30s；筛选器关键词默认 `"temp"`，可设为空字符串不过滤
+
 ### 历史修复（V7.0 之前）
 
 | 级别 | 问题 | 修复 |
@@ -537,20 +591,25 @@ WS CANCELLATION 事件不再处理（仅记录 debug 日志）。撤单完全由
 ```
 guardian_v7/
 ├── main.py           # 入口：日志初始化 → 配置加载 → Guardian.run()
-├── config.py         # 配置：冻结 dataclass，从 .env 加载全部参数，validate() 校验必填
+├── config.py         # 配置：冻结 dataclass，从 .env 加载全部参数，含 SCREENER_* 筛选器参数
 ├── models.py         # 模型：ActorState(6状态)、MarketState(dataclass)、OrderInfo
 ├── utils.py          # 工具：safe_float/safe_decimal 安全转换、round_to_tick 价格对齐、retry_call 重试
 ├── heartbeat.py      # 心跳：HeartbeatManager 守护线程，SDK→raw REST 双重保障，heartbeat_id 链式恢复
 ├── execution.py      # 执行层：全局限流 + 幂等令牌 + ThreadPoolExecutor，place/cancel/limit_sell
 ├── ws_manager.py     # WS 管理：用户频道，单线程重连，代理支持，PING 保活
 ├── ws_router.py      # WS 路由：JSON 解析 → Guardian 分发，initial_dump 完整处理
-├── guardian.py       # 主控：定时循环 + 多周期放弃 + trade 日志 + check_positions 卖出 + 线程安全管理
-├── LOGIC.md          # 策略逻辑文档（详细行为描述）
+├── guardian.py       # 主控：定时循环 + 筛选器任务 + trade 日志 + check_positions 卖出 + 状态管理
+├── screener/         # 内置筛选器子包（V7.7 从独立项目融合）
+│   ├── __init__.py   # 包入口
+│   ├── types.py      # 数据类：CandidateMarket、ScoredMarket、AllocatedMarket
+│   ├── markets.py    # 拉取 /sampling-markets + 过滤
+│   └── clob.py       # 批量查 /books + 评分排序
+├── LOGIC.md          # 策略逻辑文档（§十六：筛选器参数说明）
 ├── ARCHITECTURE.md   # 架构文档（本文件）
-├── data/             # 日志输出目录
+├── data/             # 日志 + CSV 输出目录
 │   ├── guardian.log  # 主日志
 │   ├── trades.log    # 买卖配对记录
-│   ├── cancels.log   # 撤单记录（已废弃，不再写入）
+│   └── screener_latest.csv  # 筛选结果（调试用）
 └── tests/            # 78 个单元测试
     ├── test_utils.py
     ├── test_models.py
@@ -573,7 +632,10 @@ guardian_v7/
 | `execution.py` | Guardian/Actor | 限流异步执行 | `place()`, `cancel()`, `limit_sell()`, `clear_place()` |
 | `ws_manager.py` | Guardian | WS 连接生命周期 | `start()`, `stop()`, `start_user()` |
 | `ws_router.py` | Guardian | WS 消息分发（仅用户频道） | `on_user_message()` |
-| `guardian.py` | main.py | 全盘协调 + 集中式状态管理 | `run()`, `handle_trade()`, `handle_order()`, `discover()` |
+| `guardian.py` | main.py | 全盘协调 + 集中式状态管理 + 筛选器调度 | `run()`, `handle_trade()`, `handle_order()`, `discover()`, `_run_screener()` |
+| `screener/markets.py` | guardian.py | 拉取+过滤候选市场 | `fetch_and_filter(cfg)` |
+| `screener/clob.py` | guardian.py | 订单簿批量查询+评分排序 | `analyze_orderbooks(candidates, cfg)` |
+| `screener/types.py` | screener | 筛选器数据类定义 | `CandidateMarket`, `ScoredMarket`, `AllocatedMarket` |
 
 ***
 
@@ -582,12 +644,29 @@ guardian_v7/
 ### 环境变量（.env）
 
 ```ini
-PK=0x...                    # 私钥（必填）
-CLOB_API_KEY=...            # L2 API Key（必填）
-CLOB_SECRET=...             # L2 API Secret（必填）
-CLOB_PASS_PHRASE=...        # L2 Passphrase（必填）
-PROXY_ADDRESS=0x...         # 代理合约地址（可选，EOA 钱包留空）
-CLOB_API_URL=...            # CLOB API 地址（可选，默认 https://clob.polymarket.com）
+# ── 必填 ──────────────────────────────────────────────────────────────
+PK=0x...                    # 私钥
+CLOB_API_KEY=...            # L2 API Key
+CLOB_SECRET=...             # L2 API Secret
+CLOB_PASS_PHRASE=...        # L2 Passphrase
+
+# ── 可选 ──────────────────────────────────────────────────────────────
+PROXY_ADDRESS=0x...         # 代理合约地址（EOA 钱包留空）
+CLOB_API_URL=...            # CLOB API 地址（默认 https://clob.polymarket.com）
+
+# ── 筛选器（全部可选，有默认值） ────────────────────────────────────────
+SCREENER_INTERVAL=30        # 筛选间隔（秒）
+SCREENER_KEYWORD=temp       # 关键词过滤，空字符串=不过滤
+SCREENER_MIN_DAILY_REWARDS=20.0
+SCREENER_MIN_DAYS_TO_EXPIRY=0
+SCREENER_MIN_MIDPOINT=0.15
+SCREENER_MAX_MIDPOINT=0.85
+SCREENER_MIN_SIZE_LOWER=0.0
+SCREENER_MIN_SIZE_UPPER=60
+SCREENER_MIN_EXISTING_SIZE=1500.0
+SCREENER_MIN_TOP1_BIDS=50.0
+SCREENER_MIN_TOP2_BIDS=600.0
+SCREENER_MIN_TOP3_BIDS=1500.0
 ```
 
 ### 启动
@@ -602,9 +681,10 @@ python main.py
 观察控制台/guardian.log：
 
 - 启动后立即出现 `[HEARTBEAT] 已启动 interval=7.0s`
+- 启动后 ~30s 出现筛选器输出：`N markets in Xs | yes:M no:K`
 - 每 30s `[DISCOVER] 守护 N 个市场`，N 不为 0
 - 每 7s 心跳成功（debug 级别显示 `[HEARTBEAT] OK`）
-- 无连续 `[HEARTBEAT] 失败` 或 `[ABANDON]` 消息
+- 无连续 `[HEARTBEAT] 失败` 消息
 - 无 `[WS ERR]` 或频繁 `[WS] close code=...`
 
 ### 停止

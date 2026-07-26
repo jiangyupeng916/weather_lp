@@ -46,13 +46,15 @@ Guardian 是一个 **纯 Maker（挂单方）** 自动化做市机器人，运�
 
 机器人通过两种方式获取需要挂单的市场：
 
-**方式一：CSV 文件同步（主动）**
+**方式一：内置筛选器（主动，主要来源）**
 
-配置 `MARKET_FILE` 指向 screener 输出的 CSV 文件，Guardian 每 30s 读取文件，为 YES 和 NO 两个 token 各自初始化 `MarketState` 并自动启动挂单周期。这是主要市场来源。
+Guardian 内部集成筛选器（`screener/` 子包），每 30s 自动扫描有返利奖励的市场。筛选器从 CLOB `/sampling-markets` 拉取全部奖励市场，根据订单簿深度计算 `reward_per_dollar`（每美元投入的日返利），排序后按深度阈值筛选 YES/NO 方向，结果**直接内存传递给 Guardian**——不再通过 CSV 文件中转。
 
-Guardian 跟踪哪些 token_id 来自 CSV 文件（`_file_managed_ids`）。当某个 token_id 在 CSV 中不再出现时（screener 筛选条件变化导致市场被移除），Guardian 会停止该市场的监控：取消活跃订单并从管理列表中移除。CSV 文件同步的移除机制仅对来自方式一的市场生效——来自方式二的市场不受 CSV 变化影响。
+Guardian 跟踪哪些 token_id 来自筛选器（`_file_managed_ids`）。当某个 token_id 不再出现在筛选结果中时，Guardian 停止监控：取消活跃订单并从管理列表中移除。
 
-**CSV 空 token_id 处理**：若某行的 `yes_token_id` 或 `no_token_id` 为空字符串，该侧被自动跳过。只留 YES 则只监控 YES；两个都空则整行不参与监控。这允许在不删除行的情况下临时排除特定市场。
+筛选结果同步写入 `data/screener_latest.csv` 供人工查看，但此 CSV 不参与数据流——Guardian 直接从内存读取。
+
+**筛选器深度阈值**：每侧（YES/NO）必须同时满足 top-1 ≥50、top-2 ≥600、top-3 ≥1500 才纳入监控。未通过的方向对应 token_id 被跳过，相当于只监控通过了的方向。
 
 **方式二：已有订单接管（被动）**
 
@@ -253,10 +255,11 @@ Polymarket 要求通过 REST API 每约 10 秒发送一次心跳（`POST /v1/hea
 
 | 任务 | 间隔 | 职责 |
 |------|------|------|
-| discover() | 30s | 从订单接管 + CSV 文件同步新增/移除市场；清理 STOPPED 状态 Actor |
-| _poll_best_bids() | 3s | 批量查询 `POST /books`，检测 best_bid 变化推送给 Actor |
+| _run_screener() | 30s | 内置筛选器：拉取奖励市场 → 订单簿评分 → 内存直传市场列表 → CSV 输出（调试用） |
+| discover() | 30s | 从已有订单接管 + 筛选结果同步新增/移除市场；清理 STOPPED 状态 Actor |
+| _poll_best_bids() | 3s | 批量查询 `POST /books`，检测 best_bid 变化 |
 | audit() | 120s | 批量 `POST /books` 查 best_bid，纠偏超价订单；检测订单丢失；状态卡死重置 |
-| check_positions() | 120s | 扫描持仓 → 市价卖出（FOK，唯一卖出路径） |
+| check_positions() | 120s | 扫描持仓 → 限价卖单挂在 best_bid（卖出保护：best_bid 过低则跳过） |
 | _prune_caches() | 300s | 清理过期缓存，防止内存泄漏 |
 
 ---
@@ -353,7 +356,62 @@ Polymarket 要求通过 REST API 每约 10 秒发送一次心跳（`POST /v1/hea
 
 ---
 
-## 十六、关键设计原则
+## 十六、内置筛选器参数
+
+筛选器每 30s 运行一次，从 CLOB 拉取所有有返利奖励的市场，按 `reward_per_dollar` 评分筛选。所有参数通过环境变量配置（`SCREENER_*` 前缀），均可运行时调整。
+
+### 筛选流程
+
+```
+1. GET /sampling-markets（分页）  → 数万个市场
+2. 过滤：active + accepting_orders + 有 rewards.rates + 关键词匹配
+3. 过滤：每日奖励 ≥ MIN_DAILY_REWARDS、到期天数 ≥ MIN_DAYS_TO_EXPIRY
+4. 过滤：min_size 在 [MIN_SIZE_LOWER, MIN_SIZE_UPPER] 范围内
+5. 过滤：YES 订单簿中点（midpoint）在 [MIN_MIDPOINT, MAX_MIDPOINT]
+6. POST /books 批量获取订单簿（一次调用，≤500 token_ids/批，并发 5 线程）
+7. 评分：reward_per_dollar = 每日奖励 / (中点附近现有深度 + min_size)
+8. 过滤：existing_total_size ≥ MIN_EXISTING_SIZE
+9. 方向过滤：每侧的 top-1/2/3 出价深度分别 ≥ MIN_TOP1/2/3_BIDS
+10. 按 reward_per_dollar 降序排列 → 传给 Guardian + 写 CSV
+```
+
+### 参数一览
+
+| 环境变量 | 字段 | 默认值 | 说明 |
+|----------|------|--------|------|
+| `SCREENER_INTERVAL` | `screener_interval` | `30` | 筛选间隔（秒），不宜低于 15s |
+| `SCREENER_KEYWORD` | `screener_keyword` | `"temp"` | 关键词过滤。只保留问题标题中含此关键词的市场。设为空字符串 `""` 则不过滤 |
+| `SCREENER_MIN_DAILY_REWARDS` | `screener_min_daily_rewards` | `20.0` | 最小每日返利（USDC）。低于此值的市场排除 |
+| `SCREENER_MIN_DAYS_TO_EXPIRY` | `screener_min_days_to_expiry` | `0` | 最小剩余天数。0=不限，正数排除即将到期市场 |
+| `SCREENER_MIN_MIDPOINT` | `screener_min_midpoint` | `0.15` | YES 中点下限。概率 15%–85% 之间的市场才纳入 |
+| `SCREENER_MAX_MIDPOINT` | `screener_max_midpoint` | `0.85` | YES 中点上限 |
+| `SCREENER_MIN_SIZE_LOWER` | `screener_min_size_lower` | `0.0` | 市场 min_size 下限（USDC） |
+| `SCREENER_MIN_SIZE_UPPER` | `screener_min_size_upper` | `60` | 市场 min_size 上限（USDC） |
+| `SCREENER_MIN_EXISTING_SIZE` | `screener_min_existing_size` | `1500.0` | 最低现有流动性（USDC）。中点附近总深度不足则排除 |
+| `SCREENER_MIN_TOP1_BIDS` | `screener_min_top1_bids` | `50.0` | 单方向 top-1 出价最低深度（USDC） |
+| `SCREENER_MIN_TOP2_BIDS` | `screener_min_top2_bids` | `600.0` | 单方向 top-2 出价最低深度（USDC） |
+| `SCREENER_MIN_TOP3_BIDS` | `screener_min_top3_bids` | `1500.0` | 单方向 top-3 出价最低深度（USDC） |
+
+### 评分公式
+
+```
+reward_per_dollar = total_daily_rewards / (existing_total_size + min_size)
+
+其中：
+  total_daily_rewards = 所有 rewards.rates 的 rewards_daily_rate 之和（USDC/天）
+  existing_total_size = YES买盘 + YES卖盘 + NO买盘 + NO卖盘
+                        (在中点 ± max_spread 范围内的深度之和)
+  min_size             = 该市场奖励规则要求的最低挂单量
+```
+
+**直觉**：`reward_per_dollar` 衡量每 1 USDC 投入可获得多少日返利。值越高，资金效率越好。
+
+### 关键词过滤说明
+
+默认 `SCREENER_KEYWORD="temp"`，只保留标题含 "temp" 的市场。天气类市场参与者较少、竞争较低，返利效率高。如需监控所有市场，在 `.env` 中设 `SCREENER_KEYWORD=`。
+
+---
+## 十七、关键设计原则
 
 1. **保守优先**：无法区分"交易所自动取消"和"用户手动取消"时，走重挂路径而非放弃，由多周期检测兜底
 2. **异步不阻塞**：所有 REST 操作通过线程池异步执行，Actor 事件循环不等待 IO
