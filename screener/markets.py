@@ -1,26 +1,25 @@
 import time
-import requests
-from config import CONFIG
-from market_types import CandidateMarket
+from datetime import datetime, timezone
 
+import requests
+
+from screener.types import CandidateMarket
 
 END_CURSOR = "LTE="
 
 
-def fetch_and_filter() -> list[CandidateMarket]:
+def fetch_and_filter(cfg) -> list[CandidateMarket]:
+    """拉取 CLOB /sampling-markets 并过滤，返回候选市场列表。cfg 是 guardian Config 对象。"""
+    clob_api = cfg.host
+    keyword = cfg.screener_keyword.lower() if cfg.screener_keyword else ""
+
     all_markets: list[dict] = []
     cursor = ""
     page = 0
 
     while True:
         page += 1
-        print(
-            f"\rFetching reward markets... page {page} ({len(all_markets)} so far)",
-            end="",
-            flush=True,
-        )
-
-        url = f"{CONFIG.CLOB_API}/sampling-markets"
+        url = f"{clob_api}/sampling-markets"
         params = {}
         if cursor:
             params["next_cursor"] = cursor
@@ -44,8 +43,6 @@ def fetch_and_filter() -> list[CandidateMarket]:
             break
         cursor = next_cursor
 
-    print(f"\rFetched {len(all_markets)} reward-distributing markets from CLOB")
-
     now = time.time() * 1000
     candidates: list[CandidateMarket] = []
 
@@ -65,13 +62,12 @@ def fetch_and_filter() -> list[CandidateMarket]:
             continue
 
         total_daily_rewards = sum(r.get("rewards_daily_rate", 0) for r in rates)
-        if total_daily_rewards < CONFIG.MIN_DAILY_REWARDS:
+        if total_daily_rewards < cfg.screener_min_daily_rewards:
             continue
 
         end_date_str = m.get("end_date_iso", "")
         if not end_date_str:
             continue
-        from datetime import datetime, timezone
 
         end_date = datetime.fromisoformat(
             end_date_str.replace("Z", "+00:00")
@@ -79,11 +75,11 @@ def fetch_and_filter() -> list[CandidateMarket]:
         days_to_expiry = (end_date.timestamp() * 1000 - now) / (
             1000 * 60 * 60 * 24
         )
-        if days_to_expiry < CONFIG.MIN_DAYS_TO_EXPIRY:
+        if days_to_expiry < cfg.screener_min_days_to_expiry:
             continue
 
         min_size = rewards.get("min_size", 0)
-        if min_size < CONFIG.MIN_SIZE_LOWER or min_size > CONFIG.MIN_SIZE_UPPER:
+        if min_size < cfg.screener_min_size_lower or min_size > cfg.screener_min_size_upper:
             continue
 
         max_spread = rewards.get("max_spread", 0) / 100
@@ -91,9 +87,8 @@ def fetch_and_filter() -> list[CandidateMarket]:
         if len(tokens) < 2:
             continue
 
-        if CONFIG.SEARCH_KEYWORD:
-            if CONFIG.SEARCH_KEYWORD.lower() not in m["question"].lower():
-                continue
+        if keyword and keyword not in m["question"].lower():
+            continue
 
         candidates.append(
             CandidateMarket(
@@ -109,5 +104,4 @@ def fetch_and_filter() -> list[CandidateMarket]:
             )
         )
 
-    print(f"{len(candidates)} candidates after filtering")
     return candidates

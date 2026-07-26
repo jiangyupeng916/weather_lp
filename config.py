@@ -58,8 +58,22 @@ class Config:
     stale_timeout: float = 60.0
     cooldown_delay: float = 2.0
 
-    # ── 市场筛选文件 ──────────────────────────────────────────────────────────
+    # ── 市场筛选文件（已废弃，由内置筛选器替代） ─────────────────────────
     market_file: str = field(default_factory=lambda: os.environ.get("MARKET_FILE", ""))
+
+    # ── 内置筛选器 ────────────────────────────────────────────────────────
+    screener_interval: float = float(os.environ.get("SCREENER_INTERVAL", "30"))
+    screener_keyword: str = os.environ.get("SCREENER_KEYWORD", "temp")
+    screener_min_daily_rewards: float = float(os.environ.get("SCREENER_MIN_DAILY_REWARDS", "20.0"))
+    screener_min_days_to_expiry: int = int(os.environ.get("SCREENER_MIN_DAYS_TO_EXPIRY", "0"))
+    screener_min_midpoint: float = float(os.environ.get("SCREENER_MIN_MIDPOINT", "0.15"))
+    screener_max_midpoint: float = float(os.environ.get("SCREENER_MAX_MIDPOINT", "0.85"))
+    screener_min_size_lower: float = float(os.environ.get("SCREENER_MIN_SIZE_LOWER", "0.0"))
+    screener_min_size_upper: float = float(os.environ.get("SCREENER_MIN_SIZE_UPPER", "60"))
+    screener_min_existing_size: float = float(os.environ.get("SCREENER_MIN_EXISTING_SIZE", "1500.0"))
+    screener_min_top1_bids: float = float(os.environ.get("SCREENER_MIN_TOP1_BIDS", "50.0"))
+    screener_min_top2_bids: float = float(os.environ.get("SCREENER_MIN_TOP2_BIDS", "600.0"))
+    screener_min_top3_bids: float = float(os.environ.get("SCREENER_MIN_TOP3_BIDS", "1500.0"))
 
     # ── 缓存与并发 ────────────────────────────────────────────────────────────
     cache_ttl: float = 5.0

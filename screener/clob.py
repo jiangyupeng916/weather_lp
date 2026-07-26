@@ -3,14 +3,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
-from config import CONFIG
-from market_types import CandidateMarket, ScoredMarket
+from screener.types import CandidateMarket, ScoredMarket
 
 BATCH_SIZE = 500
 
 
-def _fetch_orderbooks_batch(token_ids: list[str], retries: int = 5) -> dict[str, dict]:
-    url = f"{CONFIG.CLOB_API}/books"
+def _fetch_orderbooks_batch(token_ids: list[str], cfg, retries: int = 5) -> dict[str, dict]:
+    url = f"{cfg.host}/books"
     body = [{"token_id": tid} for tid in token_ids]
     for attempt in range(retries + 1):
         try:
@@ -40,7 +39,7 @@ def _fetch_orderbooks_batch(token_ids: list[str], retries: int = 5) -> dict[str,
                 raise
 
 
-def _fetch_all_orderbooks(candidates: list[CandidateMarket]) -> dict[str, dict]:
+def _fetch_all_orderbooks(candidates: list[CandidateMarket], cfg) -> dict[str, dict]:
     token_ids: list[str] = []
     for m in candidates:
         token_ids.append(m.yes_token_id)
@@ -49,16 +48,12 @@ def _fetch_all_orderbooks(candidates: list[CandidateMarket]) -> dict[str, dict]:
     batches = [token_ids[i:i + BATCH_SIZE] for i in range(0, len(token_ids), BATCH_SIZE)]
     all_books: dict[str, dict] = {}
 
-    with ThreadPoolExecutor(max_workers=CONFIG.CONCURRENCY_LIMIT) as executor:
-        futures = {executor.submit(_fetch_orderbooks_batch, b): b for b in batches}
-        done = 0
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_fetch_orderbooks_batch, b, cfg): b for b in batches}
         for future in as_completed(futures):
             batch_books = future.result()
             all_books.update(batch_books)
-            done += 1
-            print(f"\rFetching orderbooks: {done}/{len(batches)} batches", end="", flush=True)
 
-    print()
     return all_books
 
 
@@ -84,14 +79,14 @@ def _calc_total_size(book: dict, midpoint: float, max_spread: float) -> float:
     return bid_size + ask_size
 
 
-def _score_market(market: CandidateMarket, books: dict[str, dict]) -> ScoredMarket | None:
+def _score_market(market: CandidateMarket, books: dict[str, dict], cfg) -> ScoredMarket | None:
     yes_book = books.get(market.yes_token_id)
     no_book = books.get(market.no_token_id)
     if yes_book is None or no_book is None:
         return None
 
     midpoint = _calc_midpoint(yes_book)
-    if midpoint < CONFIG.MIN_MIDPOINT or midpoint > CONFIG.MAX_MIDPOINT:
+    if midpoint < cfg.screener_min_midpoint or midpoint > cfg.screener_max_midpoint:
         return None
 
     yes_lower = midpoint - market.max_spread
@@ -137,25 +132,17 @@ def _score_market(market: CandidateMarket, books: dict[str, dict]) -> ScoredMark
     )
 
 
-def analyze_orderbooks(candidates: list[CandidateMarket]) -> list[ScoredMarket]:
-    books = _fetch_all_orderbooks(candidates)
+def analyze_orderbooks(candidates: list[CandidateMarket], cfg) -> list[ScoredMarket]:
+    books = _fetch_all_orderbooks(candidates, cfg)
 
     results: list[ScoredMarket | None] = []
-    total = len(candidates)
-    for i, market in enumerate(candidates):
+    for market in candidates:
         try:
-            results.append(_score_market(market, books))
-        except Exception as e:
-            print(f"\n[SKIP] {market.question[:50]}: {e}")
+            results.append(_score_market(market, books, cfg))
+        except Exception:
             results.append(None)
-        if (i + 1) % 200 == 0 or (i + 1) == total:
-            print(f"\rScoring markets: {i + 1}/{total}", end="", flush=True)
-
-    print()
 
     scored = [r for r in results if r is not None]
-    print(f"{len(scored)} markets scored after orderbook analysis")
-
     return sorted(
         scored,
         key=lambda m: (-m.reward_per_dollar, m.min_size),

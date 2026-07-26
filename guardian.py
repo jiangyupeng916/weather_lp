@@ -416,32 +416,30 @@ class Guardian:
             logger.error("[SYNC] 读取市场文件失败: %s", e)
             return None
 
-    def _sync_from_file(self):
-        """从 CSV 文件同步市场：新增则创建状态，移除则停止监控并取消订单。"""
-        csv_path = self.cfg.market_file
-        if not csv_path:
-            return
-        targets = self._load_market_targets()
-        if targets is None:
-            return
-        csv_ids = {t[0] for t in targets}
+    def _apply_market_targets(self, targets: List[Tuple[str, str]]):
+        """将目标列表同步到 _markets：新增则创建状态，移除则停止监控并取消订单。
 
-        # 移除：CSV 中不再存在的 file-managed 市场
-        removed = self._file_managed_ids - csv_ids
+        targets: [(token_id, title), ...]
+        此方法供 _sync_from_file (CSV 回退) 和 _run_screener (内存直传) 共用。
+        """
+        target_ids = {t[0] for t in targets}
+
+        # 移除：不再在目标列表中的 file-managed 市场
+        removed = self._file_managed_ids - target_ids
         for token_id in list(removed):
             ms = self._markets.get(token_id)
             if ms and ms.active_id:
                 if ms.state is ActorState.CANCELING or self._has_pending_op(token_id):
                     logger.debug("[SYNC] %s 正在撤单中，延后移除", token_id[:20])
                     continue
-                logger.debug("[SYNC] 市场已从文件移除，停止监控 %s", token_id[:20])
-                self._trigger_cancel(token_id, "从CSV移除")
+                logger.debug("[SYNC] 市场已从筛选器移除，停止监控 %s", token_id[:20])
+                self._trigger_cancel(token_id, "从筛选器移除")
                 ms.active_id = None
                 ms.active_price = None
             self._markets.pop(token_id, None)
             self._file_managed_ids.discard(token_id)
 
-        # 新增：CSV 中新出现的市场
+        # 新增：新出现的市场
         for token_id, title in targets:
             if token_id not in self._markets:
                 logger.debug("[SYNC] 新市场 %s | %s", token_id[:20], title[:50])
@@ -450,6 +448,102 @@ class Guardian:
                 stagger = random.uniform(self.cfg.cooldown_delay, 30.0)
                 self._start_cooldown(ms, stagger)
             self._file_managed_ids.add(token_id)
+
+    def _sync_from_file(self):
+        """从 CSV 文件同步市场（MARKET_FILE 回退路径，V7.7 起通常不使用）。"""
+        csv_path = self.cfg.market_file
+        if not csv_path:
+            return
+        targets = self._load_market_targets()
+        if targets is None:
+            return
+        self._apply_market_targets(targets)
+
+    def _run_screener(self):
+        """内置筛选器：拉取+评分+筛选，内存直传更新 _markets，同时输出 CSV 供人工查看。"""
+        from screener import fetch_and_filter, analyze_orderbooks
+
+        t0 = time.time()
+        try:
+            candidates = fetch_and_filter(self.cfg)
+            scored = analyze_orderbooks(candidates, self.cfg)
+            # 过滤现有流动性不足的市场
+            scored = [m for m in scored
+                      if m.existing_total_size >= self.cfg.screener_min_existing_size]
+        except Exception as e:
+            logger.error("[SCREENER] 筛选失败: %s", e)
+            return
+
+        # 构建目标列表（与旧 CSV 输出逻辑一致：深度阈值检查每个方向）
+        targets: List[Tuple[str, str]] = []
+        for m in scored:
+            title = m.question
+            yes_ok = (m.yes_top3_bids >= self.cfg.screener_min_top3_bids
+                      and m.yes_top2_bids >= self.cfg.screener_min_top2_bids
+                      and m.yes_top1_bids >= self.cfg.screener_min_top1_bids)
+            no_ok = (m.no_top3_bids >= self.cfg.screener_min_top3_bids
+                     and m.no_top2_bids >= self.cfg.screener_min_top2_bids
+                     and m.no_top1_bids >= self.cfg.screener_min_top1_bids)
+            if yes_ok:
+                targets.append((m.yes_token_id, f"{title} [YES]" if title else ""))
+            if no_ok:
+                targets.append((m.no_token_id, f"{title} [NO]" if title else ""))
+
+        # 直接内存同步
+        self._apply_market_targets(targets)
+
+        # CSV 输出（调试用）
+        self._save_screener_csv(scored)
+
+        elapsed = time.time() - t0
+        yes_count = sum(1 for m in scored
+                        if m.yes_top3_bids >= self.cfg.screener_min_top3_bids
+                        and m.yes_top2_bids >= self.cfg.screener_min_top2_bids
+                        and m.yes_top1_bids >= self.cfg.screener_min_top1_bids)
+        no_count = sum(1 for m in scored
+                       if m.no_top3_bids >= self.cfg.screener_min_top3_bids
+                       and m.no_top2_bids >= self.cfg.screener_min_top2_bids
+                       and m.no_top1_bids >= self.cfg.screener_min_top1_bids)
+        logger.info("[SCREENER] %d markets in %.1fs | yes:%d no:%d | next in %ds",
+                    len(scored), elapsed, yes_count, no_count,
+                    int(self.cfg.screener_interval))
+
+    def _save_screener_csv(self, scored):
+        """保存筛选结果 CSV（调试用，不影响逻辑）。"""
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        os.makedirs(data_dir, exist_ok=True)
+        csv_path = os.path.join(data_dir, "screener_latest.csv")
+        csv_tmp = os.path.join(data_dir, "screener_latest.csv.tmp")
+
+        sorted_m = sorted(scored, key=lambda m: m.reward_per_dollar, reverse=True)
+        with open(csv_tmp, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Market", "minSz", "Reward/day", "Competition",
+                             "Comp_YES", "Comp_NO", "Comp_YES_2", "Comp_NO_2",
+                             "Comp_YES_1", "Comp_NO_1",
+                             "yes_token_id", "no_token_id"])
+            for m in sorted_m:
+                yes_ok = (m.yes_top3_bids >= self.cfg.screener_min_top3_bids
+                          and m.yes_top2_bids >= self.cfg.screener_min_top2_bids
+                          and m.yes_top1_bids >= self.cfg.screener_min_top1_bids)
+                no_ok = (m.no_top3_bids >= self.cfg.screener_min_top3_bids
+                         and m.no_top2_bids >= self.cfg.screener_min_top2_bids
+                         and m.no_top1_bids >= self.cfg.screener_min_top1_bids)
+                writer.writerow([
+                    m.question,
+                    f"{m.min_size:.0f}",
+                    f"{m.total_daily_rewards:.2f}",
+                    f"{m.existing_total_size:.0f}",
+                    f"{m.yes_top3_bids:.0f}",
+                    f"{m.no_top3_bids:.0f}",
+                    f"{m.yes_top2_bids:.0f}",
+                    f"{m.no_top2_bids:.0f}",
+                    f"{m.yes_top1_bids:.0f}",
+                    f"{m.no_top1_bids:.0f}",
+                    m.yes_token_id if yes_ok else "",
+                    m.no_token_id if no_ok else "",
+                ])
+        _os.replace(csv_tmp, csv_path)
 
     # ── 订单发现 ──────────────────────────────────────────────────────────────
     def discover(self):
@@ -847,10 +941,14 @@ class Guardian:
         self.discover()
 
         # 4. 主循环
-        last_discover = last_poll = last_audit = last_position = last_prune = time.time()
+        last_screener = last_discover = last_poll = last_audit = last_position = last_prune = time.time()
         while self.running:
             try:
                 now = time.time()
+
+                if now - last_screener >= self.cfg.screener_interval:
+                    self._run_screener()
+                    last_screener = now
 
                 if now - last_discover >= self.cfg.discover_interval:
                     self.discover()
