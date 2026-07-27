@@ -3,22 +3,20 @@
 # Guardian V7 服务器部署脚本
 # 用法: chmod +x setup.sh && ./setup.sh
 #
-# 将整个项目目录上传到服务器后，在项目根目录执行此脚本。
-# 项目结构:
-#   guardian_v7/
+# 部署文件夹自包含所有源码，直接上传整个文件夹到服务器:
+#   deploy/guardian_v7/
 #   ├── main.py  config.py  guardian.py  models.py  utils.py
 #   ├── heartbeat.py  execution.py  ws_manager.py  ws_router.py
 #   ├── screener/
-#   ├── deploy/guardian_v7/setup.sh  (本文件)
-#   ├── .env
-#   └── data/
+#   ├── setup.sh  .env.example
+#   └── (上传后创建 .env 和 data/)
 # ============================================================
 set -e
 
 # ── 确定路径 ──
-# 本脚本在 deploy/guardian_v7/ 下, 项目根目录是 ../../
+# 所有文件在同一目录下（自包含部署包）
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+PROJECT_DIR="$SCRIPT_DIR"
 
 echo "============================================"
 echo "  Guardian V7 — 服务器部署"
@@ -170,8 +168,8 @@ echo ""
 echo "──── systemd 服务 (推荐) ─────────────────────────────"
 echo ""
 echo "  # 一次性安装 (需 sudo)"
-echo "  sudo cp deploy/guardian_v7/guardian_v7.service /etc/systemd/system/"
-echo "  sudo cp deploy/guardian_v7/logrotate.conf /etc/logrotate.d/guardian_v7"
+echo "  sudo cp guardian_v7.service /etc/systemd/system/"
+echo "  sudo cp logrotate.conf /etc/logrotate.d/guardian_v7"
 echo "  sudo systemctl daemon-reload"
 echo "  sudo systemctl enable --now guardian_v7"
 echo ""
