@@ -72,7 +72,7 @@ class Config:
     screener_min_size_upper: float = float(os.environ.get("SCREENER_MIN_SIZE_UPPER", "60"))
     screener_min_existing_size: float = float(os.environ.get("SCREENER_MIN_EXISTING_SIZE", "1500.0"))
     screener_min_top1_bids: float = float(os.environ.get("SCREENER_MIN_TOP1_BIDS", "50.0"))
-    screener_min_top2_bids: float = float(os.environ.get("SCREENER_MIN_TOP2_BIDS", "600.0"))
+    screener_min_top2_bids: float = float(os.environ.get("SCREENER_MIN_TOP2_BIDS", "800.0"))
     screener_min_top3_bids: float = float(os.environ.get("SCREENER_MIN_TOP3_BIDS", "1500.0"))
 
     # ── 缓存与并发 ────────────────────────────────────────────────────────────
@@ -83,7 +83,7 @@ class Config:
 
     # ── 持仓卖出阈值 ──────────────────────────────────────────────────────────
     position_threshold: float = 1.0
-    sell_min_bid_gap: Decimal = Decimal("0.03")  # best_bid 低于成本价-此值则跳过卖出
+    sell_min_bid_gap: Decimal = Decimal("0.02")  # best_bid 低于成本价-此值则跳过卖出
 
     # ── WebSocket 连接 ────────────────────────────────────────────────────────
     ws_reconnect_delay: float = 5.0
