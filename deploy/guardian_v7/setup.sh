@@ -122,6 +122,30 @@ $PROJECT_DIR/data/*.log {
 LREOF
 echo "[OK] logrotate.conf 已生成"
 
+# ── 9.5 自动安装 systemd 服务 ──
+if command -v systemctl &>/dev/null && [ -w /etc/systemd/system ]; then
+    echo ""
+    echo "[*] 检测到 systemd，自动安装服务..."
+    cp "$SCRIPT_DIR/guardian_v7.service" /etc/systemd/system/
+    cp "$SCRIPT_DIR/logrotate.conf" /etc/logrotate.d/guardian_v7
+    systemctl daemon-reload
+    systemctl enable guardian_v7
+    echo "[OK] 服务已安装（未启动，请先测试 ./run.sh 确认正常再启动）"
+    echo ""
+    echo "  # 确认无误后启动"
+    echo "  sudo systemctl start guardian_v7"
+    echo ""
+    echo "  # 立即启动并设为开机自启"
+    echo "  sudo systemctl enable --now guardian_v7"
+else
+    echo "[*] 未检测到 systemd 或权限不足，跳过自动安装"
+    echo "    如需手动安装，请执行:"
+    echo "    sudo cp guardian_v7.service /etc/systemd/system/"
+    echo "    sudo cp logrotate.conf /etc/logrotate.d/guardian_v7"
+    echo "    sudo systemctl daemon-reload"
+    echo "    sudo systemctl enable --now guardian_v7"
+fi
+
 # ── 10. 打印当前配置 ──
 echo ""
 echo "============================================"
@@ -167,11 +191,8 @@ echo "  pkill -f main.py"
 echo ""
 echo "──── systemd 服务 (推荐) ─────────────────────────────"
 echo ""
-echo "  # 一次性安装 (需 sudo)"
-echo "  sudo cp guardian_v7.service /etc/systemd/system/"
-echo "  sudo cp logrotate.conf /etc/logrotate.d/guardian_v7"
-echo "  sudo systemctl daemon-reload"
-echo "  sudo systemctl enable --now guardian_v7"
+echo "  # 启动（先测试 ./run.sh 确认正常）"
+echo "  sudo systemctl start guardian_v7"
 echo ""
 echo "  # 日常运维"
 echo "  sudo systemctl status guardian_v7"

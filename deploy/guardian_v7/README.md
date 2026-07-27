@@ -59,31 +59,15 @@ nano .env
 ./run.sh
 ```
 
-看到以下日志表示正常启动：
+看到 `[SCREENER] N markets in Xs` 表示正常。`Ctrl+C` 退出。
 
-```
-Maker-only Guardian V7.0 启动
-守护 N 个市场
-[SCREENER] 150 markets in 3.4s | yes:22 no:9 | next in 30s
-```
-
-`Ctrl+C` 优雅退出。
-
-### 5. 安装服务
+### 5. 启动
 
 ```bash
-sudo cp guardian_v7.service /etc/systemd/system/
-sudo cp logrotate.conf /etc/logrotate.d/guardian_v7
-sudo systemctl daemon-reload
-sudo systemctl enable --now guardian_v7
+sudo systemctl start guardian_v7
 ```
 
-### 6. 检查
-
-```bash
-sudo systemctl status guardian_v7
-tail -f logs/guardian.log
-```
+`setup.sh` 已自动安装 systemd 服务，直接启动即可。
 
 ---
 
