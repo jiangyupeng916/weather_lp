@@ -299,6 +299,11 @@ class Guardian:
         ms.active_price = None
         if ms.state == ActorState.COOLING:
             return
+        # 筛选器移除的撤单 → STOPPED，不重新挂单
+        if reason == "从筛选器移除":
+            ms.state = ActorState.STOPPED
+            ms.state_at = time.time()
+            return
         ms.state = ActorState.NO_ORDER
         ms.state_at = time.time()
         self._start_cooldown(ms, self.cfg.maker_cooldown)
@@ -421,6 +426,10 @@ class Guardian:
 
         targets: [(token_id, title), ...]
         此方法供 _sync_from_file (CSV 回退) 和 _run_screener (内存直传) 共用。
+
+        移除市场时，若有活跃订单则先触发异步撤单，但保留 MarketState 在
+        _markets 中直到撤单完成。避免 discover() 在撤单完成前重新发现该订单
+        并将其加回为"孤儿"市场（不在 _file_managed_ids 中，永不清理）。
         """
         target_ids = {t[0] for t in targets}
 
@@ -428,14 +437,24 @@ class Guardian:
         removed = self._file_managed_ids - target_ids
         for token_id in list(removed):
             ms = self._markets.get(token_id)
-            if ms and ms.active_id:
-                if ms.state is ActorState.CANCELING or self._has_pending_op(token_id):
-                    logger.debug("[SYNC] %s 正在撤单中，延后移除", token_id[:20])
-                    continue
-                logger.debug("[SYNC] 市场已从筛选器移除，停止监控 %s", token_id[:20])
+            if not ms:
+                self._file_managed_ids.discard(token_id)
+                continue
+
+            # 有未完成的异步操作 → 下轮再处理
+            if ms.state is ActorState.CANCELING or self._has_pending_op(token_id):
+                continue
+
+            if ms.active_id:
+                logger.debug("[SYNC] 市场已从筛选器移除，发起撤单 %s", token_id[:20])
                 self._trigger_cancel(token_id, "从筛选器移除")
-                ms.active_id = None
-                ms.active_price = None
+                # 先从 _file_managed_ids 移除，避免下轮重复触发撤单；
+                # 但保留在 _markets 中，让 _handle_cancel_result 将状态设为
+                # STOPPED，再由 discover() 统一清理。
+                self._file_managed_ids.discard(token_id)
+                continue
+
+            # 无活跃订单 → 安全移除
             self._markets.pop(token_id, None)
             self._file_managed_ids.discard(token_id)
 
