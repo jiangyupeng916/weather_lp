@@ -91,6 +91,8 @@ class Guardian:
         self._file_managed_ids: Set[str] = set()
         # pending: [(future, token_id, op_type, metadata), ...]
         self._pending_ops: List[Tuple[Any, str, str, Dict[str, Any]]] = []
+        # 筛选器已移除、等待撤单完成的市场（替代字符串匹配，更可靠）
+        self._removed_by_screener: Set[str] = set()
 
         # ── 交易处理 ──────────────────────────────────────────────────────────
         self._sell_lock = threading.Lock()
@@ -245,6 +247,11 @@ class Guardian:
                              tid[:16])
             ms.active_id = None
             ms.active_price = None
+            # 筛选器已移除该市场 → STOPPED，不重新挂单
+            if tid in self._removed_by_screener:
+                ms.state = ActorState.STOPPED
+                ms.state_at = time.time()
+                continue
             ms.state = ActorState.NO_ORDER
             ms.state_at = time.time()
             self._start_cooldown(ms, self.cfg.maker_cooldown)
@@ -299,8 +306,8 @@ class Guardian:
         ms.active_price = None
         if ms.state == ActorState.COOLING:
             return
-        # 筛选器移除的撤单 → STOPPED，不重新挂单
-        if reason == "从筛选器移除":
+        # 筛选器已移除该市场 → STOPPED，不重新挂单
+        if token_id in self._removed_by_screener:
             ms.state = ActorState.STOPPED
             ms.state_at = time.time()
             return
@@ -330,6 +337,8 @@ class Guardian:
     def _check_cooldowns(self, now: float):
         for token_id, ms in list(self._markets.items()):
             if ms.state == ActorState.COOLING and now >= ms.cooldown_until:
+                if token_id in self._removed_by_screener:
+                    continue
                 self._trigger_place(token_id)
 
     def _check_pending_ops(self, now: float):
@@ -448,9 +457,7 @@ class Guardian:
             if ms.active_id:
                 logger.debug("[SYNC] 市场已从筛选器移除，发起撤单 %s", token_id[:20])
                 self._trigger_cancel(token_id, "从筛选器移除")
-                # 先从 _file_managed_ids 移除，避免下轮重复触发撤单；
-                # 但保留在 _markets 中，让 _handle_cancel_result 将状态设为
-                # STOPPED，再由 discover() 统一清理。
+                self._removed_by_screener.add(token_id)
                 self._file_managed_ids.discard(token_id)
                 continue
 
@@ -575,6 +582,7 @@ class Guardian:
         for tid in stopped:
             self._markets.pop(tid, None)
             self._file_managed_ids.discard(tid)
+            self._removed_by_screener.discard(tid)
             logger.debug("[DISCOVER] 清理 STOPPED 市场 %s", tid[:20])
 
         # 发现新市场（已有挂单）
