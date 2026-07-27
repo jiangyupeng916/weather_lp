@@ -121,7 +121,8 @@ class Guardian:
         self.running = False
 
     # ── 查询 ──────────────────────────────────────────────────────────────────
-    def open_orders(self) -> List[OrderInfo]:
+    def open_orders(self) -> Optional[List[OrderInfo]]:
+        """查询所有活跃订单。失败时返回 None，调用方不应认为是"无订单"。"""
         try:
             raw = self.client.get_open_orders(OpenOrderParams())
             return [
@@ -137,7 +138,7 @@ class Guardian:
             ]
         except Exception as e:
             logger.error("查询订单失败: %s", e)
-            return []
+            return None
 
     def market_info(self, asset_id: str) -> dict:
         with self._cache_lock:
@@ -295,6 +296,9 @@ class Guardian:
         if not ok:
             if ms.active_id is None:
                 logger.warning("[CANCEL FAIL] %s 订单已不存在，忽略取消失败", order_id[:20])
+                if token_id in self._removed_by_screener:
+                    ms.state = ActorState.STOPPED
+                    ms.state_at = time.time()
                 return
             logger.error("[CANCEL FAIL] %s 订单仍存活在交易所！保持 RESTING", order_id[:20])
             ms.state = ActorState.RESTING
@@ -338,6 +342,8 @@ class Guardian:
         for token_id, ms in list(self._markets.items()):
             if ms.state == ActorState.COOLING and now >= ms.cooldown_until:
                 if token_id in self._removed_by_screener:
+                    ms.state = ActorState.STOPPED
+                    ms.state_at = now
                     continue
                 self._trigger_place(token_id)
 
@@ -366,9 +372,12 @@ class Guardian:
                         if ms_sub and ms_sub.state is ActorState.CANCELING:
                             ms_sub.active_id = None
                             ms_sub.active_price = None
-                            ms_sub.state = ActorState.NO_ORDER
+                            if tid in self._removed_by_screener:
+                                ms_sub.state = ActorState.STOPPED
+                            else:
+                                ms_sub.state = ActorState.NO_ORDER
+                                self._start_cooldown(ms_sub, self.cfg.maker_cooldown)
                             ms_sub.state_at = time.time()
-                            self._start_cooldown(ms_sub, self.cfg.maker_cooldown)
                 continue
 
             ms = self._markets.get(token_id)
@@ -573,17 +582,21 @@ class Guardian:
 
     # ── 订单发现 ──────────────────────────────────────────────────────────────
     def discover(self):
-        orders = self.open_orders()
-        buys = {o.token_id: o for o in orders if o.side.upper() == "BUY"}
-        now = time.time()
-
-        # 清理 STOPPED 状态市场
+        # 清理 STOPPED 状态市场（不依赖 open_orders）
         stopped = [tid for tid, ms in self._markets.items() if ms.state == ActorState.STOPPED]
         for tid in stopped:
             self._markets.pop(tid, None)
             self._file_managed_ids.discard(tid)
             self._removed_by_screener.discard(tid)
             logger.debug("[DISCOVER] 清理 STOPPED 市场 %s", tid[:20])
+
+        orders = self.open_orders()
+        if orders is None:
+            logger.error("[DISCOVER] 订单查询失败，跳过本周期")
+            return
+
+        buys = {o.token_id: o for o in orders if o.side.upper() == "BUY"}
+        now = time.time()
 
         # 发现新市场（已有挂单）
         for tid in set(buys.keys()) - set(self._markets.keys()):
@@ -664,7 +677,11 @@ class Guardian:
                 if ms.state is ActorState.RESTING:
                     cancels.append(aid)
                 elif ms.state is ActorState.NO_ORDER and ms.cooldown_until <= time.time():
-                    self._start_cooldown(ms, self.cfg.maker_cooldown)
+                    if aid in self._removed_by_screener:
+                        ms.state = ActorState.STOPPED
+                        ms.state_at = time.time()
+                    else:
+                        self._start_cooldown(ms, self.cfg.maker_cooldown)
 
         if cancels:
             self._batch_cancel(cancels, "best_bid变化")
@@ -698,9 +715,43 @@ class Guardian:
             return 0.0
 
     # ── 审计 ──────────────────────────────────────────────────────────────────
+    def _audit_timeouts_only(self):
+        """open_orders 失败时的降级审计：仅处理状态超时，不动 RESTING 检查。"""
+        now = time.time()
+        for token_id, ms in list(self._markets.items()):
+            if self._has_pending_op(token_id):
+                continue
+            if ms.state == ActorState.CANCELING \
+                    and (now - ms.state_at) > self.cfg.stale_timeout:
+                logger.warning("[AUDIT] %s CANCELING 超时重置", token_id[:16])
+                self.exec_layer.clear_place_by_asset(token_id)
+                ms.active_id = None
+                ms.active_price = None
+                ms.state = ActorState.NO_ORDER
+                ms.state_at = now
+                self._start_cooldown(ms, self.cfg.maker_cooldown)
+            elif ms.state == ActorState.PLACING \
+                    and (now - ms.state_at) > self.cfg.stale_timeout:
+                logger.warning("[AUDIT] %s PLACING 超时重置", token_id[:16])
+                self.exec_layer.clear_place_by_asset(token_id)
+                ms.active_id = None
+                ms.active_price = None
+                ms.state = ActorState.NO_ORDER
+                ms.state_at = now
+                self._start_cooldown(ms, self.cfg.maker_cooldown)
+            elif ms.state is ActorState.NO_ORDER \
+                    and (now - ms.state_at) > self.cfg.stale_timeout:
+                logger.warning("[AUDIT] %s NO_ORDER 卡死强制重挂", token_id[:16])
+                self._start_cooldown(ms, self.cfg.maker_cooldown)
+        logger.debug("[AUDIT] 降级完成（订单查询失败，跳过订单校验）")
+
     def audit(self):
         logger.debug("[AUDIT] 开始...")
         orders = self.open_orders()
+        if orders is None:
+            # API 查询失败，仅处理状态超时，跳过依赖订单列表的检查
+            self._audit_timeouts_only()
+            return
         order_map = {o.order_id: o for o in orders}
         buys = [o for o in orders if o.side.upper() == "BUY"]
         now = time.time()
@@ -862,6 +913,9 @@ class Guardian:
                 logger.error("[POSITION] 批量查询 best_bid 失败: %s", e)
 
         orders = self.open_orders()
+        if orders is None:
+            logger.error("[POSITION] 订单查询失败，跳过卖出检查")
+            return
         # {token_id: (order_id, price)} — 用于判断是否需要更新卖价
         sell_map = {o.token_id: (o.order_id, safe_decimal(o.price))
                     for o in orders if o.side.upper() == "SELL"}
