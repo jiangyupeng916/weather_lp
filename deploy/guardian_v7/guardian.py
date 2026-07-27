@@ -366,17 +366,12 @@ class Guardian:
                     self._handle_batch_cancel_result(pairs,
                                                       meta.get("reason", ""), result)
                 else:
-                    # 批量撤单异常：统一清空 active_id 进入冷却兜底
+                    # 批量撤单异常：SDK 调用失败，订单仍在交易所存活
+                    # 回退 RESTING 等待下轮 poll/audit 重试，不清空 active_id
                     for tid, _oid in pairs:
                         ms_sub = self._markets.get(tid)
                         if ms_sub and ms_sub.state is ActorState.CANCELING:
-                            ms_sub.active_id = None
-                            ms_sub.active_price = None
-                            if tid in self._removed_by_screener:
-                                ms_sub.state = ActorState.STOPPED
-                            else:
-                                ms_sub.state = ActorState.NO_ORDER
-                                self._start_cooldown(ms_sub, self.cfg.maker_cooldown)
+                            ms_sub.state = ActorState.RESTING
                             ms_sub.state_at = time.time()
                 continue
 
