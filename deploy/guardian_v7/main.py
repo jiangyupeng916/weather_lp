@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import io
-import logging
 import os
 import sys
 import warnings
@@ -16,6 +15,14 @@ import warnings
 INSTANCE = "bot1"
 # ────────────────────────────────────────────────────────────────────────────
 
+# .env 必须在 config 模块 import 之前加载，否则 Config 类定义时读到的是空环境变量
+from dotenv import load_dotenv as _load_env
+_env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), f".env.{INSTANCE}")
+if os.path.exists(_env_file):
+    _load_env(_env_file)
+else:
+    _load_env()  # 回退到默认 .env
+
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
@@ -23,10 +30,9 @@ if sys.platform == "win32":
 # 屏蔽第三方库的版本兼容警告等噪音
 warnings.filterwarnings("ignore")
 
-from config import load_config, Config
+import logging
+from config import Config
 from guardian import Guardian
-
-load_config(f".env.{INSTANCE}")
 
 LOG_FMT = "%(asctime)s - %(levelname)s - %(message)s"
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", INSTANCE)
