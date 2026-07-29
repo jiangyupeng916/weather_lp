@@ -9,13 +9,21 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Optional
 
-from dotenv import load_dotenv
 
-load_dotenv()
+def load_config(env_file: str = ".env") -> None:
+    """加载指定 .env 文件（在导入 Config 之前调用）。"""
+    from dotenv import load_dotenv as _load
+    if os.path.exists(env_file):
+        _load(env_file)
+    elif env_file != ".env" and os.path.exists(".env"):
+        _load(".env")  # 回退到默认 .env
 
 
 @dataclass(frozen=True)
 class Config:
+    # ── 实例标识 ──────────────────────────────────────────────────────────────
+    instance_name: str = "default"
+
     # ── 服务端点 ──────────────────────────────────────────────────────────────
     host: str = os.environ.get("CLOB_API_URL", "https://clob.polymarket.com")
     ws_user: str = "wss://ws-subscriptions-clob.polymarket.com/ws/user"

@@ -44,19 +44,16 @@ from ws_router import WSRouter
 logger = logging.getLogger("guardian")
 
 
-def _file_logger(name: str) -> logging.Logger:
-    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+def _file_logger(name: str, instance: str) -> logging.Logger:
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", instance)
     os.makedirs(data_dir, exist_ok=True)
-    lg = logging.getLogger(name)
+    lg = logging.getLogger(f"{name}.{instance}")
     lg.setLevel(logging.INFO)
     lg.propagate = False
     h = logging.FileHandler(os.path.join(data_dir, f"{name}.log"), encoding="utf-8")
     h.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
     lg.addHandler(h)
     return lg
-
-
-trade_logger = _file_logger("trades")
 
 
 class Guardian:
@@ -95,6 +92,7 @@ class Guardian:
         self._removed_by_screener: Set[str] = set()
 
         # ── 交易处理 ──────────────────────────────────────────────────────────
+        self.trade_logger = _file_logger("trades", self.cfg.instance_name)
         self._sell_lock = threading.Lock()
         self._selling: Set[str] = set()
         self._processed_trades: Dict[str, float] = {}
@@ -540,7 +538,8 @@ class Guardian:
 
     def _save_screener_csv(self, scored):
         """保存筛选结果 CSV（调试用，不影响逻辑）。"""
-        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "data", self.cfg.instance_name)
         os.makedirs(data_dir, exist_ok=True)
         csv_path = os.path.join(data_dir, "screener_latest.csv")
         csv_tmp = os.path.join(data_dir, "screener_latest.csv.tmp")
@@ -858,7 +857,7 @@ class Guardian:
 
         mi = self.market_info(asset_id)
         if side == "BUY":
-            trade_logger.info(json.dumps({
+            self.trade_logger.info(json.dumps({
                 "buy_confirmed": {
                     "trade_id": tid, "token_id": asset_id, "side": "BUY",
                     "size": our_fill, "price": price,
@@ -868,7 +867,7 @@ class Guardian:
             logger.info("[BUY CONFIRMED] %s | %s | size=%.4f price=%s",
                         mi.get("title", "未知")[:40], outcome, our_fill, price)
         else:
-            trade_logger.info(json.dumps({
+            self.trade_logger.info(json.dumps({
                 "sell_confirmed": {
                     "trade_id": tid, "token_id": asset_id, "side": "SELL",
                     "size": our_fill, "price": price,

@@ -10,6 +10,12 @@ import os
 import sys
 import warnings
 
+# ── 实例配置：修改此处切换账号/策略 ──────────────────────────────────────────
+# 对应项目根目录下的 .env.<INSTANCE> 文件，例如 .env.bot1
+# 所有数据/日志输出到 data/<INSTANCE>/ 目录，多实例互不干扰
+INSTANCE = "bot1"
+# ────────────────────────────────────────────────────────────────────────────
+
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
@@ -17,11 +23,13 @@ if sys.platform == "win32":
 # 屏蔽第三方库的版本兼容警告等噪音
 warnings.filterwarnings("ignore")
 
-from config import Config
+from config import load_config, Config
 from guardian import Guardian
 
+load_config(f".env.{INSTANCE}")
+
 LOG_FMT = "%(asctime)s - %(levelname)s - %(message)s"
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", INSTANCE)
 os.makedirs(DATA_DIR, exist_ok=True)
 
 logging.basicConfig(
@@ -45,7 +53,7 @@ logging.getLogger("requests.packages.urllib3").setLevel(logging.WARNING)
 
 
 def main():
-    cfg = Config()
+    cfg = Config(instance_name=INSTANCE)
     cfg.validate()
     Guardian(cfg).run()
 
