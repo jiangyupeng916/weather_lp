@@ -1,5 +1,6 @@
 # 敏感文件
 .env
+.env.*
 
 # Python
 __pycache__/
