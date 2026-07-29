@@ -111,6 +111,14 @@ class Guardian:
         logger.info("地址: %s | 档: %d | 量: %s | 冷却: %.0fs | 心跳: %.1fs",
                     self.address, self.cfg.maker_rank, self.cfg.maker_size,
                     self.cfg.maker_cooldown, self.cfg.heartbeat_interval)
+        logger.info("筛选器: keyword=%s top1=%.0f top2=%.0f top3=%.0f existing=%.0f rewards>=%.0f",
+                    self.cfg.screener_keyword or "(不过滤)",
+                    self.cfg.screener_min_top1_bids, self.cfg.screener_min_top2_bids,
+                    self.cfg.screener_min_top3_bids, self.cfg.screener_min_existing_size,
+                    self.cfg.screener_min_daily_rewards)
+        logger.info("实例: %s | midpoint=[%.2f, %.2f]",
+                    self.cfg.instance_name,
+                    self.cfg.screener_min_midpoint, self.cfg.screener_max_midpoint)
         logger.info("=" * 60)
 
     # ── 信号处理 ──────────────────────────────────────────────────────────────
