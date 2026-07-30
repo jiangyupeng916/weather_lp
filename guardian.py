@@ -95,6 +95,8 @@ class Guardian:
         self.trade_logger = _file_logger("trades", self.cfg.instance_name)
         self._sell_lock = threading.Lock()
         self._selling: Set[str] = set()
+        self._pending_sell_tokens: Set[str] = set()  # BUY 成交后待触发卖单的 token
+        self._pending_sell_lock = threading.Lock()
         self._processed_trades: Dict[str, float] = {}
         self._trade_lock = threading.Lock()
 
@@ -874,6 +876,9 @@ class Guardian:
             }, ensure_ascii=False))
             logger.info("[BUY CONFIRMED] %s | %s | size=%.4f price=%s",
                         mi.get("title", "未知")[:40], outcome, our_fill, price)
+            # BUY 成交立即排队触发卖单，不等 position_interval(120s) 定时轮询
+            with self._pending_sell_lock:
+                self._pending_sell_tokens.add(asset_id)
         else:
             self.trade_logger.info(json.dumps({
                 "sell_confirmed": {
@@ -979,6 +984,101 @@ class Guardian:
         if placed:
             logger.info("[POSITION] 限价卖出 %d 个持仓", placed)
 
+    # ── BUY 成交即时触发卖单 ───────────────────────────────────────────────────
+    def _fetch_single_best_bid(self, tid: str):
+        """单 token 查询 best_bid（POST /books 单条请求），失败返回 None。"""
+        try:
+            r = requests.post(
+                f"{self.cfg.host}/books",
+                json=[{"token_id": tid}],
+                timeout=10,
+            )
+            if r.status_code == 200:
+                for item in r.json():
+                    bids = item.get("bids", [])
+                    if bids:
+                        return Decimal(bids[-1].get("price", "0"))
+        except Exception as e:
+            logger.error("[SELL-TRIGGER] 查询 best_bid 失败 %s: %s", tid[:16], e)
+        return None
+
+    def _sell_single_position(self, tid: str):
+        """BUY 成交后针对单个 token 的即时卖单逻辑，在独立守护线程中执行。
+
+        逻辑与 check_positions 保持一致，但只处理一个 token，不做 avgPrice 兜底
+        检查（avgPrice 保护由 120s 的 check_positions 定时兜底覆盖）。
+        """
+        with self._sell_lock:
+            if tid in self._selling:
+                logger.debug("[SELL-TRIGGER] %s 正在处理中，跳过", tid[:16])
+                return
+            self._selling.add(tid)
+
+        try:
+            # 1. 查 best_bid
+            bb = self._fetch_single_best_bid(tid)
+            if bb is None:
+                logger.debug("[SELL-TRIGGER] %s 无法获取 best_bid，回退等定时轮询", tid[:16])
+                return
+
+            # 2. 查当前活跃卖单
+            orders = self.open_orders()
+            if orders is None:
+                logger.warning("[SELL-TRIGGER] open_orders 失败，回退等 120s 定时轮询")
+                return
+            sell_map = {
+                o.token_id: (o.order_id, safe_decimal(o.price))
+                for o in orders if o.side.upper() == "SELL"
+            }
+            existing = sell_map.get(tid)
+
+            # 已有完全相同价格的卖单 → 无需重复挂
+            if existing and existing[1] == bb:
+                logger.debug("[SELL-TRIGGER] %s 已有相同价格卖单 %s，跳过", tid[:16], bb)
+                return
+
+            # 3. 查链上余额
+            bal = self.onchain_balance(tid)
+            if bal <= self.cfg.position_threshold:
+                logger.debug("[SELL-TRIGGER] %s 余额 %.4f ≤ 阈值，跳过", tid[:16], bal)
+                return
+
+            # 4. 撤旧卖单（价格变了）
+            if existing:
+                logger.info("[SELL-TRIGGER] %s 更新卖价 %s → %s", tid[:16], existing[1], bb)
+                self.exec_layer.cancel(existing[0], "BUY成交后更新卖价")
+
+            logger.info("[SELL-TRIGGER] BUY成交触发挂单 %s | %.4f shares @ %s", tid[:16], bal, bb)
+            fut = self.exec_layer.limit_sell(tid, bal, bb, self.cfg.tick_size)
+            self._pending_ops.append((fut, tid, "limit_sell_triggered", {"price": bb}))
+
+        except Exception as e:
+            logger.error("[SELL-TRIGGER] %s 处理异常: %s", tid[:16], e, exc_info=True)
+        finally:
+            with self._sell_lock:
+                self._selling.discard(tid)
+
+    def _check_pending_sells(self):
+        """消费 _pending_sell_tokens，为每个 token 启动独立守护线程执行卖单逻辑。
+
+        调用方：主循环内层 1s tick。本方法本身不阻塞，REST 调用在线程里执行。
+        """
+        with self._pending_sell_lock:
+            if not self._pending_sell_tokens:
+                return
+            tokens = list(self._pending_sell_tokens)
+            self._pending_sell_tokens.clear()
+
+        for tid in tokens:
+            t = threading.Thread(
+                target=self._sell_single_position,
+                args=(tid,),
+                daemon=True,
+                name=f"sell-trigger-{tid[:8]}",
+            )
+            t.start()
+            logger.debug("[SELL-TRIGGER] 启动卖单线程 %s", tid[:16])
+
     # ── 缓存清理 ──────────────────────────────────────────────────────────────
     def _prune_caches(self):
         with self._cache_lock:
@@ -1059,6 +1159,7 @@ class Guardian:
                     now = time.time()
                     self._check_cooldowns(now)
                     self._check_pending_ops(now)
+                    self._check_pending_sells()  # BUY 成交即时触发卖单
                     time.sleep(1)
             except Exception as e:
                 logger.error("主循环异常: %s", e, exc_info=True)
