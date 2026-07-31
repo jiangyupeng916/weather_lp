@@ -69,7 +69,8 @@ logging.basicConfig(
 
 # 降低第三方库噪音
 for _noisy in ("urllib3", "websocket", "requests", "httpx", "httpcore",
-               "py_clob_client_v2", "charset_normalizer"):
+               "py_clob_client_v2", "charset_normalizer", "hpack", "h2",
+               "hyperframe", "httpx._client"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 logger = logging.getLogger("wss.main")

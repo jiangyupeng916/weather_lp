@@ -843,27 +843,27 @@ class Guardian:
     def handle_trade(self, data: dict):
         tid = data.get("id", "")
         status = str(data.get("status", "")).upper()
-        asset_id = data.get("asset_id") or data.get("token_id", "")
-        price = safe_float(data.get("price", 0))
-        side = str(data.get("side", "")).upper()
-        outcome = data.get("outcome", "")
 
-        with self._trade_lock:
-            if tid in self._processed_trades:
-                return
-
-        if not asset_id or status != "CONFIRMED":
-            return
-
-        with self._trade_lock:
-            self._processed_trades[tid] = time.time()
-
+        # ── 从 maker_orders 找我们自己的成交 ──────────────────────────────────
         maker_orders = data.get("maker_orders") or []
-        our_fill = sum(
-            safe_float(m.get("matched_amount", 0))
-            for m in maker_orders
+        our_orders = [
+            m for m in maker_orders
             if (m.get("owner") or m.get("order_owner", "")) == self.cfg.api_key
-        )
+        ]
+        our_fill = sum(safe_float(m.get("matched_amount", 0)) for m in our_orders)
+
+        # 优先用 maker_orders 里我们订单的 asset_id / price / outcome
+        # 顶层字段是 taker 那侧的数据（互补 token），不能直接用
+        if our_orders:
+            asset_id = our_orders[0].get("asset_id") or data.get("asset_id") or data.get("token_id", "")
+            price    = safe_float(our_orders[0].get("price") or data.get("price", 0))
+            outcome  = our_orders[0].get("outcome") or data.get("outcome", "")
+            side     = str(our_orders[0].get("side", data.get("side", ""))).upper()
+        else:
+            asset_id = data.get("asset_id") or data.get("token_id", "")
+            price    = safe_float(data.get("price", 0))
+            outcome  = data.get("outcome", "")
+            side     = str(data.get("side", "")).upper()
 
         mi = self.market_info(asset_id)
         if side == "BUY":
