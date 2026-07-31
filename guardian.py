@@ -844,6 +844,16 @@ class Guardian:
         tid = data.get("id", "")
         status = str(data.get("status", "")).upper()
 
+        # ── 去重：同一 trade_id 只处理一次（MINED/CONFIRMED 共用相同 id）──────
+        with self._trade_lock:
+            if tid in self._processed_trades:
+                return
+            self._processed_trades[tid] = time.time()
+
+        # 仅处理 CONFIRMED；MINED 时链上余额尚未到账，跳过
+        if status != "CONFIRMED":
+            return
+
         # ── 从 maker_orders 找我们自己的成交 ──────────────────────────────────
         maker_orders = data.get("maker_orders") or []
         our_orders = [
@@ -1049,10 +1059,23 @@ class Guardian:
                 logger.info("[SELL-TRIGGER] %s 已有相同价格卖单 %s，无需重挂", tid[:16], bb)
                 return
 
-            # 4. 查链上余额
-            bal = self.onchain_balance(tid)
-            if bal <= self.cfg.position_threshold:
-                logger.warning("[SELL-TRIGGER] %s 余额 %.4f ≤ 阈值 %.4f，跳过", tid[:16], bal, self.cfg.position_threshold)
+            # 4. 查链上余额（BUY 刚成交时链上余额可能延迟到账，最多重试 5 次，间隔 2s）
+            bal = Decimal("0")
+            for attempt in range(1, 6):
+                bal = self.onchain_balance(tid)
+                if bal > self.cfg.position_threshold:
+                    break
+                if attempt < 5:
+                    logger.info(
+                        "[SELL-TRIGGER] %s 余额 %.4f ≤ 阈值，等待链上确认 (%d/5)…",
+                        tid[:16], bal, attempt,
+                    )
+                    time.sleep(2)
+            else:
+                logger.warning(
+                    "[SELL-TRIGGER] %s 余额 %.4f ≤ 阈值 %.4f，5次重试后放弃",
+                    tid[:16], bal, self.cfg.position_threshold,
+                )
                 return
 
             # 5. 撤旧卖单（价格变了）
