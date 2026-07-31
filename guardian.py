@@ -1011,15 +1011,16 @@ class Guardian:
         """
         with self._sell_lock:
             if tid in self._selling:
-                logger.debug("[SELL-TRIGGER] %s 正在处理中，跳过", tid[:16])
+                logger.info("[SELL-TRIGGER] %s 正在处理中，跳过重复触发", tid[:16])
                 return
             self._selling.add(tid)
+        logger.info("[SELL-TRIGGER] %s 开始执行，fill_price=%s", tid[:16], fill_price)
 
         try:
             # 1. 查 best_bid
             bb = self._fetch_single_best_bid(tid)
             if bb is None:
-                logger.debug("[SELL-TRIGGER] %s 无法获取 best_bid，回退等定时轮询", tid[:16])
+                logger.warning("[SELL-TRIGGER] %s 无法获取 best_bid，回退等定时轮询", tid[:16])
                 return
 
             # 2. 价差保护：best_bid 太低说明大单打穿订单簿，等市场回稳
@@ -1045,13 +1046,13 @@ class Guardian:
 
             # 已有完全相同价格的卖单 → 无需重复挂
             if existing and existing[1] == bb:
-                logger.debug("[SELL-TRIGGER] %s 已有相同价格卖单 %s，跳过", tid[:16], bb)
+                logger.info("[SELL-TRIGGER] %s 已有相同价格卖单 %s，无需重挂", tid[:16], bb)
                 return
 
             # 4. 查链上余额
             bal = self.onchain_balance(tid)
             if bal <= self.cfg.position_threshold:
-                logger.debug("[SELL-TRIGGER] %s 余额 %.4f ≤ 阈值，跳过", tid[:16], bal)
+                logger.warning("[SELL-TRIGGER] %s 余额 %.4f ≤ 阈值 %.4f，跳过", tid[:16], bal, self.cfg.position_threshold)
                 return
 
             # 5. 撤旧卖单（价格变了）
@@ -1081,6 +1082,7 @@ class Guardian:
             self._pending_sell_tokens.clear()
 
         for tid, fill_price in tokens.items():
+            logger.info("[SELL-TRIGGER] BUY成交，启动即时卖单线程 %s fill_price=%s", tid[:16], fill_price)
             t = threading.Thread(
                 target=self._sell_single_position,
                 args=(tid, fill_price),
@@ -1088,7 +1090,6 @@ class Guardian:
                 name=f"sell-trigger-{tid[:8]}",
             )
             t.start()
-            logger.debug("[SELL-TRIGGER] 启动卖单线程 %s fill_price=%s", tid[:16], fill_price)
 
     # ── 缓存清理 ──────────────────────────────────────────────────────────────
     def _prune_caches(self):
