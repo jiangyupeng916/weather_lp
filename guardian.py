@@ -486,6 +486,8 @@ class Guardian:
                 stagger = random.uniform(self.cfg.cooldown_delay, 30.0)
                 self._start_cooldown(ms, stagger)
             self._file_managed_ids.add(token_id)
+            # 筛选器重新加入此市场 → 清除移除标记，允许正常挂单
+            self._removed_by_screener.discard(token_id)
 
     def _sync_from_file(self):
         """从 CSV 文件同步市场（MARKET_FILE 回退路径，V7.7 起通常不使用）。"""
