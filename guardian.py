@@ -239,31 +239,51 @@ class Guardian:
 
     def _handle_batch_cancel_result(self, tid_oid_pairs: List[Tuple[str, str]],
                                       reason: str, result: dict):
-        """根据批量撤单结果更新状态：成功的进入冷却，失败的也进入冷却（让 audit/poll 下轮重查）。
+        """根据批量撤单结果更新状态。
 
-        失败分支也进入冷却而非回退 RESTING，避免 SDK 返回 id 格式不一致时
-        形成死循环。同时清空 active_id，让下一轮 poll/audit 重新发现真实状态。
+        成功取消 → 清空 active_id，进入冷却，正常重挂流程。
+        取消失败 → 回退 RESTING（保留 active_id），由 audit (120s) 确认真实状态：
+          - 若订单仍活着：RESTING 是正确状态，不会引发双订单
+          - 若订单已不在：audit 检测到 active_id 缺失后重置并重挂
+
+        ID 归一化：对比前去掉可能的 "0x" 前缀并转小写，避免 SDK 格式不一致误判为失败。
         """
-        canceled_set = set(result.get("canceled", []))
+        def _norm(oid: str) -> str:
+            return oid.lower().lstrip("0x")
+
+        canceled_raw = set(result.get("canceled", []))
+        canceled_norm = {_norm(c) for c in canceled_raw}
+
         for tid, oid in tid_oid_pairs:
             ms = self._markets.get(tid)
             if not ms or ms.state is not ActorState.CANCELING:
                 continue
-            if oid in canceled_set:
+
+            success = oid in canceled_raw or _norm(oid) in canceled_norm
+
+            if success:
                 logger.debug("[BATCH CANCEL] %s 取消成功", tid[:16])
-            else:
-                logger.error("[BATCH CANCEL] %s 取消失败，清空 active_id 进入冷却兜底",
-                             tid[:16])
-            ms.active_id = None
-            ms.active_price = None
-            # 筛选器已移除该市场 → STOPPED，不重新挂单
-            if tid in self._removed_by_screener:
-                ms.state = ActorState.STOPPED
+                ms.active_id = None
+                ms.active_price = None
+                # 筛选器已移除该市场 → STOPPED，不重新挂单
+                if tid in self._removed_by_screener:
+                    ms.state = ActorState.STOPPED
+                    ms.state_at = time.time()
+                    continue
+                ms.state = ActorState.NO_ORDER
                 ms.state_at = time.time()
-                continue
-            ms.state = ActorState.NO_ORDER
-            ms.state_at = time.time()
-            self._start_cooldown(ms, self.cfg.maker_cooldown)
+                self._start_cooldown(ms, self.cfg.maker_cooldown)
+            else:
+                # 取消失败（网络错误或订单已被撤销但 id 归一化后仍不匹配）
+                # 回退 RESTING，保留 active_id，等 audit 120s 后确认真实状态
+                # 这样即便订单仍活着也不会触发重挂，彻底杜绝双订单
+                logger.error(
+                    "[BATCH CANCEL] %s 取消结果不明，回退 RESTING 等 audit 确认 | oid=%s",
+                    tid[:16], oid[:20],
+                )
+                # 筛选器已移除 → 保持 RESTING（audit 会重新触发撤单）
+                ms.state = ActorState.RESTING
+                ms.state_at = time.time()
 
     # ── 挂单动作（异步两步） ──────────────────────────────────────────────────
     def _trigger_place(self, token_id: str):
@@ -381,6 +401,16 @@ class Guardian:
                         if ms_sub and ms_sub.state is ActorState.CANCELING:
                             ms_sub.state = ActorState.RESTING
                             ms_sub.state_at = time.time()
+                continue
+
+            # 重复订单清理（audit 发起，不对应状态机，只打日志）
+            if op == "duplicate_cancel":
+                if isinstance(result, dict):
+                    canceled = result.get("canceled", [])
+                    logger.info("[AUDIT] 重复买单撤销完成: %d 成功 / %d 请求",
+                                len(canceled), len(meta.get("order_ids", [])))
+                else:
+                    logger.error("[AUDIT] 重复买单撤销异常")
                 continue
 
             ms = self._markets.get(token_id)
@@ -848,7 +878,54 @@ class Guardian:
 
         if overpriced:
             self._batch_cancel(overpriced, "审计纠偏")
-        logger.debug("[AUDIT] 完成 %d 买单检查 | 纠偏 %d 个", len(buys), len(overpriced))
+
+        # ── 重复订单检测：同一 token 有多笔 BUY 单 → 只保留 active_id 对应的 ──
+        # 正常情况每个 token 最多一笔，若出现多笔说明之前某次 cancel 失败后又重挂
+        buys_by_token: Dict[str, List] = {}
+        for o in buys:
+            buys_by_token.setdefault(o.token_id, []).append(o)
+
+        dup_oids: List[str] = []
+        for token_id, token_orders in buys_by_token.items():
+            if len(token_orders) <= 1:
+                continue
+            if self._has_pending_op(token_id):
+                continue  # 有 pending 操作，下轮再检查
+            ms = self._markets.get(token_id)
+            keep_id = ms.active_id if (ms and ms.active_id) else None
+            # keep_id 为 None 时保留最先出现的那笔（index 0），撤掉其余
+            kept = False
+            for o in token_orders:
+                if not kept and (keep_id is None or o.order_id == keep_id):
+                    kept = True
+                    continue
+                dup_oids.append(o.order_id)
+            logger.warning(
+                "[AUDIT] %s 检测到 %d 份重复买单，撤销 %d 份 (keep=%s)",
+                token_id[:16], len(token_orders), len(token_orders) - 1,
+                (keep_id or "first")[:20],
+            )
+
+        if dup_oids:
+            fut = self.exec_layer.cancel_batch(dup_oids, "重复订单清理")
+            # 这些是"野单"，不对应状态机 active_id，用专属 op 类型只做日志
+            self._pending_ops.append((fut, "_dupes_", "duplicate_cancel",
+                                      {"order_ids": dup_oids}))
+
+        # ── 筛选器已移除但订单仍活着的市场 → 重试撤单 ──────────────────────
+        # _handle_batch_cancel_result 失败路径回退 RESTING 后，这里负责补救
+        for token_id, ms in list(self._markets.items()):
+            if (token_id in self._removed_by_screener
+                    and ms.state is ActorState.RESTING
+                    and ms.active_id
+                    and not self._has_pending_op(token_id)):
+                logger.warning(
+                    "[AUDIT] %s 筛选器已移除但订单仍活，重新触发撤单", token_id[:16]
+                )
+                self._trigger_cancel(token_id, "审计重试撤单(筛选器已移除)")
+
+        logger.debug("[AUDIT] 完成 %d 买单检查 | 纠偏 %d 个 | 重复 %d 个",
+                     len(buys), len(overpriced), len(dup_oids))
 
     # ── 交易处理 ──────────────────────────────────────────────────────────────
     def handle_trade(self, data: dict):
@@ -1170,7 +1247,8 @@ class Guardian:
         self.discover()
 
         # 4. 主循环
-        last_screener = last_discover = last_poll = last_audit = last_position = last_prune = time.time()
+        last_screener = 0.0  # 进入主循环第一个 tick 立即触发首次 screener
+        last_discover = last_poll = last_audit = last_position = last_prune = time.time()
         while self.running:
             try:
                 now = time.time()
