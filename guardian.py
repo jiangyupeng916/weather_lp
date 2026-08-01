@@ -893,6 +893,15 @@ class Guardian:
                 continue  # 有 pending 操作，下轮再检查
             ms = self._markets.get(token_id)
             keep_id = ms.active_id if (ms and ms.active_id) else None
+            order_ids_in_response = {o.order_id for o in token_orders}
+            # keep_id 不在本次 open_orders 响应里（API 延迟）→ 跳过，下轮再判断
+            # 避免误撤状态机正在跟踪的订单
+            if keep_id and keep_id not in order_ids_in_response:
+                logger.debug(
+                    "[AUDIT] %s active_id 不在 open_orders 响应中，跳过重复订单清理",
+                    token_id[:16],
+                )
+                continue
             # keep_id 为 None 时保留最先出现的那笔（index 0），撤掉其余
             kept = False
             for o in token_orders:
