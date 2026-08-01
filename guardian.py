@@ -591,7 +591,7 @@ class Guardian:
         for tid in stopped:
             self._markets.pop(tid, None)
             self._file_managed_ids.discard(tid)
-            self._removed_by_screener.discard(tid)
+            # 不清除 _removed_by_screener：防止 discover 重新加回孤儿订单
             logger.debug("[DISCOVER] 清理 STOPPED 市场 %s", tid[:20])
 
         orders = self.open_orders()
@@ -604,6 +604,15 @@ class Guardian:
 
         # 发现新市场（已有挂单）
         for tid in set(buys.keys()) - set(self._markets.keys()):
+            # 跳过筛选器已移除的市场，避免重新监控孤儿订单
+            if tid in self._removed_by_screener:
+                o = buys[tid]
+                logger.info(
+                    "[DISCOVER] 跳过已移除市场 %s (order=%s)，等待 audit() 清理",
+                    tid[:20], o.order_id[:20],
+                )
+                continue
+
             o = buys[tid]
             logger.debug("[DISCOVER] 新市场 %s price=%s", tid[:20], o.price)
             self._markets[tid] = MarketState(
