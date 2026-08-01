@@ -16,6 +16,10 @@ Guardian V7 是一个 **Polymarket CLOB 交易平台的 Maker-only 自动化做�
 
 **策略文档**：详细逻辑见 [LOGIC.md](./LOGIC.md)。
 
+**运行模式**：
+- **原版 Polling 模式**（`python main.py`）：REST 批量轮询 best_bid（3s 间隔），适合稳定低频场景
+- **WSS 实时模式**（`python -m wss.main`）：WebSocket 推送 best_bid（<100ms 延迟），适合高频实时响应
+
 ***
 
 ## 二、体系结构
@@ -40,11 +44,17 @@ utils.py    ← 无内部依赖（纯函数工具）
     │
     └── guardian.py    ← 以上全部
             │
-        main.py        ← config, guardian
+            ├── main.py        ← config, guardian（原版 Polling 模式入口）
+            │
+            └── wss/           ← WSS 实时模式模块
+                ├── market_ws.py      ← websocket-client（市场频道 WS）
+                ├── guardian_wss.py   ← guardian.py（继承 Guardian，覆写 4 方法）
+                └── main.py           ← wss 入口（sys.path 修正 + GuardianWss.run()）
 ```
 
 ### 2.2 数据流全景
 
+**原版 Polling 模式**：
 ```
                            ┌─── REST API ───────┐
                            │                     │
@@ -85,42 +95,153 @@ utils.py    ← 无内部依赖（纯函数工具）
   └───────────────────────────────────────────────┘
 ```
 
+**WSS 实时模式**（wss/ 模块）：
+```
+                           ┌─── REST API ───────┐
+                           │                     │
+                  ┌────────▼──────┐  ┌───────────▼──────┐
+                  │ HeartbeatManager│ │ ExecutionLayer    │
+                  └────────────────┘  └────────┬──────────┘
+                                               │ Future
+  ┌──────────────────┐          ┌──────────────┤
+  │ screener/ 筛选器  │          │              │
+  └────────┬─────────┘  ┌───────▼──────────┐   │
+           │             │  WSRouter (User) │   │
+           │             └──┬───────────────┘   │
+           │                │          │         │
+           │             ┌──▼──────────▼──┐      │
+           │             │ User WS        │      │
+           │             │ (trade/order)  │      │
+           │             └────────────────┘      │
+           │                                     │
+  ┌────────┼─────────────────────────────┐      │
+  │ MarketWS (market 频道，独立线程)      │      │
+  │  - book 事件 (订单簿快照)             │      │
+  │  - price_change 事件 (best_bid 变化)  │      │
+  │  → Queue → 主线程 _process_ws_bids()  │      │
+  └────────┬─────────────────────────────┘      │
+           │                                     │
+  ┌────────▼─────────────────────────────────────▼──┐
+  │     GuardianWss(Guardian) 主线程               │
+  │     _run_screener(30s)                        │
+  │     discover(30s)                             │
+  │     _process_ws_bids() ← WS Queue (实时)       │
+  │     audit(120s)                               │
+  │     positions(120s)                           │
+  │     prune(300s)                               │
+  │     cooldown/pending(1s)                      │
+  │                                               │
+  │     Dict[str, MarketState]                    │
+  │     (主线程直读直写，无锁)                      │
+  └───────────────────────────────────────────────┘
+```
+
+**关键差异**：
+- **原版**：`_poll_best_bids()` 每 3s REST 批量查询 → 中延迟（3s）
+- **WSS**：MarketWS 推送 `price_change` 事件 → Queue → 主线程处理 → 低延迟（<100ms）
+- **WSS 跳过**：`_poll_best_bids()` 不再运行（继承但不调用）
+
 ***
 
 ## 三、核心组件详解
 
-### 3.0 卖出策略 — 定时扫描持仓（市价 FOK 卖出）
+### 3.0 卖出策略 — BUY 成交即时触发 + 定时扫描兜底
 
-**卖出唯一路径**：`check_positions()` 每 120s 定时扫描，发现持仓后**市价卖出（FOK）**。
+**卖出双路径**（V7.9+）：
+
+1. **即时触发路径**（~1-2s）：
+   - `handle_trade()` 收到 BUY CONFIRMED → `_pending_sell_tokens.add(asset_id, fill_price)`
+   - `_check_pending_sells()` 每 1s 消费队列，为每个 token 启动守护线程
+   - `_sell_single_position(tid, fill_price)`：
+     - 查 best_bid（单条 POST /books）
+     - **sell_min_bid_gap 保护**：`best_bid < fill_price - gap` → 跳过（大单打薄订单簿，等市场恢复）
+     - 查 open_orders 避免重复
+     - **余额重试**：`onchain_balance()` 最多重试 5 次，间隔 2s（链上确认延迟）
+     - 挂限价卖单 @ best_bid
+   - 并发保护：`_selling` set + `_sell_lock`（同一 token 不重复触发）
+   - **trade_id 去重**：`_processed_trades` 防止 MINED/CONFIRMED 双触发
+
+2. **定时扫描兜底**（120s）：
+   - `check_positions()` 扫描所有持仓
+   - 批量查 best_bid（POST /books 分片）
+   - 查 open_orders 找已有卖单
+   - 无卖单 → 挂限价卖单 @ best_bid
+   - **avgPrice 保护**：`best_bid < avgPrice - sell_min_bid_gap` → 取消现有卖单等待
 
 数据流：
 
 ```
-check_positions() 每 120s 执行：
+handle_trade() BUY CONFIRMED:
     │
-    ├─ 1. 查询 Data API 持仓列表
+    ├─ 去重：_processed_trades 检查 trade_id（同一 id 只处理一次）
+    ├─ 过滤：仅处理 CONFIRMED 状态（跳过 MINED）
     │
-    ├─ 2. 查询 open_orders() 找出已有卖单的 token_id
-    │
-    ├─ 3. 对每个持仓：
-    │     ├─ 已有卖单 → 跳过（避免重复）
-    │     ├─ 正在卖出中 → 跳过（并发保护）
-    │     └─ 无卖单 → onchain_balance() → market_sell(balance)
-    │           ├─ 成功 → trade_logger 记录 buy/sell 配对
-    │           └─ 失败 → 记录错误日志，下轮重试
-    │
-    └─ 4. 并发保护：_selling set + _sell_lock
+    └─ _pending_sell_tokens[asset_id] = fill_price
+            │
+            ▼ (1s tick)
+    _check_pending_sells() → 启动守护线程
+            │
+            ▼
+    _sell_single_position(tid, fill_price):
+        1. POST /books 查 best_bid
+        2. sell_min_bid_gap 保护（跳过 = 交由 120s 兜底）
+        3. open_orders 查重
+        4. onchain_balance() 重试 5 次×2s（等链上确认）
+        5. limit_sell @ best_bid
+            ├─ 成功 → trade_logger 记录
+            └─ 失败 → 下轮 check_positions 兜底
+
+check_positions() 每 120s（兜底）:
+    1. 查持仓列表
+    2. 批量查 best_bid
+    3. 查 open_orders 找已有卖单
+    4. 对每个持仓：
+        ├─ 已有卖单 → 检查 avgPrice 保护，必要时取消
+        ├─ 正在卖出中（_selling）→ 跳过
+        └─ 无卖单 → onchain_balance() → limit_sell @ best_bid
 ```
 
 **关键设计**：
-- 简单可靠：不依赖 WS CONFIRMED → 立即卖出的复杂链路
-- 天然去重：查询已有卖单后再决定是否补挂
-- 自愈能力：重启/事件丢失后最多 120s 自动补挂
-- 数据安全：查询 onchain_balance 确认链上余额后才下单
-- **FOK 语义**：Fill-or-Kill，要么全部成交要么全部撤销，不产生部分成交残留
-- **市价不传 price**：SDK `calculate_market_price` 自动根据订单簿深度计算可成交价格
+- **双保险**：即时触发失败 → 120s 兜底补挂
+- **天然去重**：`_selling` set + open_orders 查询
+- **自愈能力**：重启/事件丢失后最多 120s 自动补挂
+- **数据安全**：查询 onchain_balance 确认链上余额后才下单
+- **sell_min_bid_gap 保护**：大单打薄订单簿时跳过即时挂单，等市场深度恢复（通常数分钟内）
 
-`handle_trade()` 仅记录 CONFIRMED 事件到 trade_logger 用于审计，不触发任何卖出动作。
+V7.9 前仅有 check_positions 路径，卖出延迟最坏 120s。V7.9+ 改为即时触发 ~1-2s + 120s 兜底。
+
+### 3.0.1 handle_trade() — trade 事件处理（V7.10 修复）
+
+```python
+handle_trade(data: dict):
+    # 去重：同一 trade_id 只处理一次（MINED/CONFIRMED 共用相同 id）
+    with _trade_lock:
+        if tid in _processed_trades:
+            return
+        _processed_trades[tid] = time.time()
+    
+    # 仅处理 CONFIRMED；MINED 时链上余额尚未到账
+    if status != "CONFIRMED":
+        return
+    
+    # 优先从 maker_orders[api_key] 读取我们的真实数据
+    # （顶层字段是 taker 视角，token/price 互补）
+    our_orders = [m for m in maker_orders if m.owner == api_key]
+    if our_orders:
+        asset_id = our_orders[0].asset_id  # Yes token
+        price = our_orders[0].price        # 真实成交价
+    
+    if side == "BUY":
+        trade_logger.info(buy_confirmed)
+        _pending_sell_tokens[asset_id] = price  # 触发即时卖单
+    else:
+        trade_logger.info(sell_confirmed)
+```
+
+**V7.10 修复**：
+- **trade_id 去重**：MINED + CONFIRMED 双事件只处理一次
+- **读取正确字段**：`maker_orders[api_key]` 包含我们的真实 token/price（顶层是 taker 的互补数据）
+- **示例**：买入 Yes@0.51 → 顶层显示 No@0.49（0.51+0.49=1.00），maker_orders 才是 Yes@0.51
 
 ### 3.1 config.py — 配置模块
 
@@ -387,6 +508,8 @@ _run_screener() 每 30s:
 
 ### 4.1 线程清单
 
+**原版 Polling 模式**：
+
 | 线程 | 数量 | 持久性 | 用途 |
 |------|------|--------|------|
 | MainThread | 1 | 持久 | 主循环 + 所有市场状态管理 |
@@ -394,8 +517,20 @@ _run_screener() 每 30s:
 | ws-user | 1 | 持久 | 用户 WS（单线程重连） |
 | ws-ping | 1 | 持久 | 用户频道 PING |
 | exec-N | ≤10 | 持久 | ThreadPoolExecutor 工作线程 |
+| sell-trigger-* | 按需 | 短期 | BUY 成交后即时卖单（守护线程，完成即退出） |
+
+**WSS 实时模式**（额外增加）：
+
+| 线程 | 数量 | 持久性 | 用途 |
+|------|------|--------|------|
+| market-ws | 1 | 持久 | MarketWS 连接线程（订阅市场 book/price_change） |
+| market-ws-ping | 1 | 持久 | 市场频道 PING 保活 |
 
 **V7.4 变更**：删除 Actor-×N 线程（每市场一个）和回调线程。异步结果由 `_check_pending_ops()` 在主循环中轮询 `Future.done()` 完成回传。
+
+**V7.9 变更**：新增 sell-trigger-* 守护线程，BUY 成交后启动，完成卖单挂单后自动退出。
+
+**V7.10 变更**：新增 wss/ 模块，market-ws 独立线程处理市场 WS 事件。
 
 ### 4.2 锁层级（防死锁）
 
@@ -405,11 +540,17 @@ _run_screener() 每 30s:
 1. _trade_lock         (Lock)     — 已处理 trade ID 去重
 2. _cache_lock         (RLock)    — 缓存读写
 3. _sell_lock          (Lock)     — 卖出并发保护
+4. _pending_sell_lock  (Lock)     — _pending_sell_tokens 队列保护
 
 + ExecutionLayer 内部锁               — 独立，不与上述交叉
++ MarketWS._lock (WSS)                — 市场 WS 订阅状态保护
 ```
 
 **V7.4 变更**：删除 `_actors_lock`（不再有 Actor 管理）和 `_state_lock`（状态全在主线程）。
+
+**V7.9 变更**：新增 `_pending_sell_lock` 保护 `_pending_sell_tokens` 字典（WS 线程写，主线程读）。
+
+**V7.10 变更**：新增 `MarketWS._lock` 保护订阅状态（主线程读 subscribed_ids，WS 线程写）。
 
 ### 4.3 线程安全关键设计
 
@@ -452,7 +593,66 @@ WS CANCELLATION 事件不再处理（仅记录 debug 日志）。撤单完全由
 
 ## 六、版本变更记录
 
-### V7.1（2026-07-22）：代码审查整改
+### V7.10（2026-07-31）：WSS 实时模式 + 孤儿订单修复
+
+**WSS 实时模式**（wss/ 模块）：
+- 新增 `wss/market_ws.py`：MarketWS 类，订阅市场 book/price_change 事件
+- 新增 `wss/guardian_wss.py`：GuardianWss(Guardian) 继承，覆写 4 个方法
+- 新增 `wss/main.py`：WSS 版本启动入口，sys.path 修正
+- best_bid 来源：WebSocket 推送（<100ms）替代 REST 轮询（3s）
+- `_route()` 处理 JSON 数组（Polymarket WS 协议）
+- `_sync_ws_subscriptions()` 动态订阅/取消订阅市场
+
+**P0：孤儿订单 bug**（commit 75e3a25）：
+- **问题**：筛选器移除市场后，`discover()` 可能重新加回导致订单失去监控
+- **竞态序列**：移除 → 触发 cancel → STOPPED → discover 清理 `_removed_by_screener` → open_orders 仍返回订单（API 延迟）→ 重新加回 `_markets` → 孤儿（不在 `_file_managed_ids`）
+- **为何 WSS 更易触发**：实时操作快（1-2s），API 最终一致性延迟（100-500ms）变显著；原版慢（10s discover 间隔）掩盖此 bug
+- **修复**：
+  - `discover()` 清理 STOPPED 时不再清除 `_removed_by_screener`
+  - 发现新市场时跳过 `_removed_by_screener` 中的 token
+
+**P0：重复 SELL-TRIGGER**（commit 859c16a）：
+- **问题**：同一笔交易收到 MINED + CONFIRMED 双事件 → 启动 2 个线程
+- **修复**：
+  - `handle_trade()` 增加 `_processed_trades` 去重（同一 trade_id 只处理一次）
+  - 仅处理 CONFIRMED 状态，跳过 MINED（链上余额尚未到账）
+
+**P1：余额延迟**（commit 859c16a）：
+- **问题**：BUY CONFIRMED 后链上余额延迟到账（0-3s），第一次查询=0 直接放弃
+- **修复**：`_sell_single_position()` 余额≤阈值时重试 5 次，间隔 2s
+
+**P0：handle_trade 读取错误字段**（commit c402a0d）：
+- **问题**：Polymarket trade event 顶层字段是 taker 视角（互补 token），买入 Yes@0.51 显示 No@0.49
+- **修复**：优先读取 `maker_orders[api_key]` 中的真实 asset_id/price/outcome
+
+**WSS 基础修复**（commit 287ca14）：
+- `ModuleNotFoundError: No module named 'config'` → `sys.path.insert(0, _ROOT)`
+- `_route()` 处理 JSON 数组（Polymarket 协议）
+- SELL-TRIGGER 日志升级为 INFO/WARNING 级别
+- 修复 market_ws 订阅逻辑
+
+### V7.9（2026-07-30）：BUY 成交即时触发卖单
+
+### V7.9（2026-07-30）：BUY 成交即时触发卖单
+
+**背景**：原来 `check_positions()` 每 120s 才挂卖单，成交后最坏等待 120s。
+
+**修复路径**：
+- `handle_trade()` BUY CONFIRMED 后将 asset_id 加入 `_pending_sell_tokens`（WS 线程，仅做 dict 写，不阻塞）
+- `_check_pending_sells()`（1s tick）消费队列，为每个 token 启动守护线程
+- `_sell_single_position(tid, fill_price)`（守护线程）：
+  - POST /books 单条查 best_bid
+  - **sell_min_bid_gap 保护**：`best_bid < fill_price - gap` → 跳过（大单打薄订单簿，等市场恢复）
+  - GET /orders 查现有卖单
+  - onchain_balance
+  - limit_sell @ best_bid
+- 120s 的 `check_positions()` 保留作兜底（含 avgPrice 低于成本保护）
+
+**效果**：
+- 卖单延迟：最坏 120s → ~1-2s
+- 防重复：复用已有 `_sell_lock` + `_selling` 集合，与 check_positions 互斥同一 token
+
+### V7.8（2026-07-29）：多实例 + open_orders 失败修复
 
 **死代码清理**：删除 `_sell()` / `sell_position()` / `mark_trade_processed()` / `market_sell()` 及关联配置。
 
