@@ -46,7 +46,7 @@ class Config:
             object.__setattr__(self, "signature_type", st)
 
     # ── Maker 挂单策略 ────────────────────────────────────────────────────────
-    maker_size: Decimal = Decimal("20")
+    maker_size: Decimal = Decimal("50")
     maker_rank: int = 2
     maker_cooldown: float = 120.0
     tick_size: Decimal = Decimal("0.01")

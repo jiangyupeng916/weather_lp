@@ -1009,8 +1009,9 @@ class Guardian:
         if not pos_list:
             return
 
-        # 批量查询所有持仓的 best_bid
-        best_bid_map: Dict[str, Decimal] = {}
+        # 批量查询所有持仓的 best_ask（maker 卖单挂在 best_ask，省 taker 费 + 赚价差）
+        # 注：/books 的 asks 数组降序排列，asks[-1] 为最低卖价 = best_ask
+        best_ask_map: Dict[str, Decimal] = {}
         for chunk in self._chunk_list([p["asset"] for p in pos_list if p.get("asset")], 500):
             try:
                 r = requests.post(
@@ -1020,11 +1021,11 @@ class Guardian:
                 )
                 if r.status_code == 200:
                     for item in r.json():
-                        bids = item.get("bids", [])
-                        if bids:
-                            best_bid_map[item["asset_id"]] = Decimal(bids[-1].get("price", "0"))
+                        asks = item.get("asks", [])
+                        if asks:
+                            best_ask_map[item["asset_id"]] = Decimal(asks[-1].get("price", "0"))
             except Exception as e:
-                logger.error("[POSITION] 批量查询 best_bid 失败: %s", e)
+                logger.error("[POSITION] 批量查询 best_ask 失败: %s", e)
 
         orders = self.open_orders()
         if orders is None:
@@ -1041,26 +1042,26 @@ class Guardian:
             if not tid:
                 continue
 
-            bb = best_bid_map.get(tid)
-            if bb is None:
+            ba = best_ask_map.get(tid)
+            if ba is None:
                 continue
             entry = safe_float(p.get("avgPrice", 0))
 
-            # best_bid 太低 → 取消现有卖单，等下一轮
+            # best_ask 低于成本-gap（市场崩了）→ 取消现有卖单，持有等回稳
             if entry > 0:
-                min_bid = Decimal(str(entry)) - self.cfg.sell_min_bid_gap
-                if bb < min_bid:
+                min_ask = Decimal(str(entry)) - self.cfg.sell_min_bid_gap
+                if ba < min_ask:
                     existing = sell_map.get(tid)
                     if existing:
                         logger.warning(
-                            "[POSITION] %s best_bid=%s < 成本%.4f-%.2f=%.4f，取消卖单等待",
-                            tid[:16], bb, entry, self.cfg.sell_min_bid_gap, min_bid)
-                        self.exec_layer.cancel(existing[0], "best_bid过低取消卖单")
+                            "[POSITION] %s best_ask=%s < 成本%.4f-%.2f=%.4f，取消卖单等待",
+                            tid[:16], ba, entry, self.cfg.sell_min_bid_gap, min_ask)
+                        self.exec_layer.cancel(existing[0], "best_ask过低取消卖单")
                     continue
 
-            # 已有卖单且价格相同 → 跳过
+            # 已有卖单且价格已贴在 best_ask → 保持不动（保住队列位置，不重复撤挂）
             existing = sell_map.get(tid)
-            if existing and existing[1] == bb:
+            if existing and existing[1] == ba:
                 continue
 
             with self._sell_lock:
@@ -1073,23 +1074,23 @@ class Guardian:
                 if bal <= self.cfg.position_threshold:
                     continue
 
-                # 价格变了 → 撤旧卖单
+                # 挂单价 != best_ask（别人在更低价插了新卖单）→ 撤旧、重挂追到新 best_ask
                 if existing:
-                    logger.info("[LIMIT SELL] %s 更新卖价 %s → %s",
-                               tid[:16], existing[1], bb)
-                    self.exec_layer.cancel(existing[0], "更新卖价")
+                    logger.info("[LIMIT SELL] %s 追价 %s → %s",
+                               tid[:16], existing[1], ba)
+                    self.exec_layer.cancel(existing[0], "追price到best_ask")
 
-                logger.info("[LIMIT SELL] %s | %.4f shares @ %s",
-                           p.get("title", "未知")[:40], bal, bb)
-                fut = self.exec_layer.limit_sell(tid, bal, bb, self.cfg.tick_size)
-                self._pending_ops.append((fut, tid, "limit_sell", {"price": bb}))
+                logger.info("[LIMIT SELL] %s | %.4f shares @ %s (maker)",
+                           p.get("title", "未知")[:40], bal, ba)
+                fut = self.exec_layer.limit_sell(tid, bal, ba, self.cfg.tick_size)
+                self._pending_ops.append((fut, tid, "limit_sell", {"price": ba}))
                 placed += 1
             finally:
                 with self._sell_lock:
                     self._selling.discard(tid)
 
         if placed:
-            logger.info("[POSITION] 限价卖出 %d 个持仓", placed)
+            logger.info("[POSITION] maker 卖单 %d 个持仓", placed)
 
     # ── BUY 成交即时触发卖单 ───────────────────────────────────────────────────
     def _fetch_single_best_bid(self, tid: str):
