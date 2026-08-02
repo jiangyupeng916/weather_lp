@@ -1,0 +1,6 @@
+polymarket-client
+python-dotenv
+requests
+websocket-client
+eth-account
+schedule
