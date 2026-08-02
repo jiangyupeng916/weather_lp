@@ -27,9 +27,17 @@ import sys
 INSTANCE = "bot1"   # 切换为 "bot2" 即可运行第二个账号
 
 # ── 加载环境变量（必须在导入 Config 之前）─────────────────────────────────────
-from config import load_config, Config
+# 注意：Config 类字段中的 os.environ.get() 在类定义（import）时立即求值，
+# 因此必须在 import config 之前就把 .env 写入 os.environ。
+import os as _os
+from dotenv import load_dotenv as _load_dotenv
+_env_file = f".env.{INSTANCE}"
+if _os.path.exists(_env_file):
+    _load_dotenv(_env_file)
+elif _os.path.exists(".env"):
+    _load_dotenv(".env")
 
-load_config(f".env.{INSTANCE}")
+from config import load_config, Config
 
 
 def _setup_logging():
