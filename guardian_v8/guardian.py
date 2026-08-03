@@ -33,6 +33,7 @@ from heartbeat import HeartbeatManager
 from execution import ExecutionLayer
 from ws_manager import WSManager
 from ws_router import WSRouter
+from scheduler import PeriodicScheduler
 
 logger = logging.getLogger("guardian")
 
@@ -1265,48 +1266,30 @@ class Guardian:
         # 3. 发现已有订单
         self.discover()
 
-        # 4. 主循环
-        last_screener = 0.0  # 进入主循环第一个 tick 立即触发首次 screener
-        last_discover = last_poll = last_audit = last_position = last_prune = time.time()
+        # 4. 主循环（H1 第一步：单一 1s tick + 独立计时器）
+        #    调度粒度回到真正的 1s —— poll 不再被旧的内层 10×1s 循环拖成 ~10s。
+        #    周期任务此时仍同步执行（阻塞问题由 H1 第二步「后台化」解决）。
+        scheduler = PeriodicScheduler()
+        scheduler.add("screener", self.cfg.screener_interval, self._run_screener,
+                      run_immediately=True)
+        scheduler.add("discover", self.cfg.discover_interval, self.discover)
+        scheduler.add("poll", self.cfg.best_bid_poll_interval, self._poll_best_bids)
+        scheduler.add("audit", self.cfg.audit_interval, self.audit)
+        scheduler.add("position", self.cfg.position_interval, self.check_positions)
+        scheduler.add("prune", self.cfg.cache_prune_interval, self._prune_caches)
+
         while self.running:
             try:
+                # 周期任务：各自到期才触发（PeriodicScheduler 内部逐任务捕获异常）
+                scheduler.tick()
+                # 每 tick 必做的轻活（非阻塞，毫秒级）
                 now = time.time()
-
-                if now - last_screener >= self.cfg.screener_interval:
-                    self._run_screener()
-                    last_screener = now
-
-                if now - last_discover >= self.cfg.discover_interval:
-                    self.discover()
-                    last_discover = now
-
-                if now - last_poll >= self.cfg.best_bid_poll_interval:
-                    self._poll_best_bids()
-                    last_poll = now
-
-                if now - last_audit >= self.cfg.audit_interval:
-                    self.audit()
-                    last_audit = now
-
-                if now - last_position >= self.cfg.position_interval:
-                    self.check_positions()
-                    last_position = now
-
-                if now - last_prune >= self.cfg.cache_prune_interval:
-                    self._prune_caches()
-                    last_prune = now
-
-                for _ in range(10):
-                    if not self.running:
-                        break
-                    now = time.time()
-                    self._check_cooldowns(now)
-                    self._check_pending_ops(now)
-                    self._check_pending_sells()  # BUY 成交即时触发卖单
-                    time.sleep(1)
+                self._check_cooldowns(now)
+                self._check_pending_ops(now)      # 回写撤单/挂单结果
+                self._check_pending_sells()       # 消费 BUY 成交即时卖单队列
             except Exception as e:
                 logger.error("主循环异常: %s", e, exc_info=True)
-                time.sleep(10)
+            time.sleep(1)
 
         # 6. 优雅关闭
         self._shutdown()

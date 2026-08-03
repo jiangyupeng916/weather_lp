@@ -148,32 +148,38 @@ wss/  ← 未启用的市场频道 WSS 实现（cache/market_ws/guardian_wss/gua
 
 ## 六、主循环调度（当前实现）
 
+H1 第一小步已落地：单一 1s tick + `PeriodicScheduler` 独立计时器，删除旧的内层 `for _ in range(10)`。
+
 ```python
-# guardian.run() 简化
-last_screener = 0.0   # 首个 tick 立即触发
-last_discover = last_poll = last_audit = last_position = last_prune = now
+# guardian.run() 简化（scheduler.py: PeriodicScheduler）
+scheduler = PeriodicScheduler()
+scheduler.add("screener", 30,  _run_screener, run_immediately=True)  # 阻塞 REST
+scheduler.add("discover", 30,  discover)                              # 阻塞 REST
+scheduler.add("poll",     3,   _poll_best_bids)                       # 阻塞 REST
+scheduler.add("audit",    120, audit)                                 # 阻塞 REST
+scheduler.add("position", 120, check_positions)                       # 阻塞 REST
+scheduler.add("prune",    300, _prune_caches)
 while running:
-    now = time.time()
-    if now-last_screener >= 30:  _run_screener();   last_screener=now   # 阻塞 REST
-    if now-last_discover >= 30:  discover();         last_discover=now   # 阻塞 REST
-    if now-last_poll     >= 3:   _poll_best_bids();  last_poll=now       # 阻塞 REST
-    if now-last_audit    >= 120: audit();            last_audit=now      # 阻塞 REST
-    if now-last_position >= 120: check_positions();  last_position=now   # 阻塞 REST
-    if now-last_prune    >= 300: _prune_caches();    last_prune=now
-    for _ in range(10):          # 内层固定 10×1s
+    try:
+        scheduler.tick()             # 各任务到期才触发，内部逐任务捕获异常
+        now = time.time()
         _check_cooldowns(now)
-        _check_pending_ops(now)   # 回写撤单/挂单结果
-        _check_pending_sells()    # 消费即时卖单队列
-        time.sleep(1)
+        _check_pending_ops(now)      # 回写撤单/挂单结果
+        _check_pending_sells()       # 消费即时卖单队列
+    except Exception:
+        logger.error(...)            # 不再 sleep(10)，保持卖单回写响应
+    time.sleep(1)
 ```
 
-### 6.1 当前调度的两个结构性问题（本轮 H1 要修）
+`PeriodicScheduler`（`scheduler.py`）是纯调度逻辑：每任务持有 `interval` + `last_run`，`tick()` 逐个判断到期。**触发前先更新 `last_run`** → 回调抛异常也不热循环；**逐任务 try/except** → 一个任务失败不影响同 tick 其他任务。用注入的 `now_fn`（假时钟）可脱离网络单测，见 `tests/test_scheduler.py`（6 例全过）。
 
-**问题 A — 阻塞 REST 冻结状态机**
-`_run_screener` / `discover` / `_poll_best_bids` / `audit` / `check_positions` 全是**同步阻塞** `requests`，跑在主线程。尤其 `_run_screener`（`/sampling-markets` 分页 × 每页最多 5 次重试 × 退避 2/4/6/8s × timeout 30s，再叠加 `analyze_orderbooks` 等所有批次）最坏能堵**几十秒到数分钟**。这段时间内层的 `_check_pending_ops`（回写撤单/挂单）、`_check_pending_sells`（即时卖单）全部停摆——成交在 WS 线程照常进队列，却要等主线程从 screener 返回才被消费。
+### 6.1 结构性问题：一个已修，一个待第二小步
 
-**问题 B — best_bid 轮询实际约 10s 而非 3s**
-内层 `for _ in range(10): time.sleep(1)` 固定占 ~10s，外层 `if now-last_xxx >= interval` 每 ~10s 才被求值一次。所以 `best_bid_poll_interval=3.0` **永远达不到，实际 ≥10s**。价格滞后 → 挂单跨价/被吃单风险上升。
+**问题 B — best_bid 轮询实际约 10s 而非 3s ✅ 已修（第一小步）**
+旧代码内层 `for _ in range(10): time.sleep(1)` 固定占 ~10s，外层计时器每 ~10s 才求值一次，`best_bid_poll_interval=3.0` 永远达不到。改单一 1s tick 后，各计时器每 1s 求值，poll 回到真正的 3s 粒度（无阻塞时）。
+
+**问题 A — 阻塞 REST 冻结状态机 ⏳ 待第二小步（后台化）**
+`_run_screener` / `discover` / `_poll_best_bids` / `audit` / `check_positions` 仍是**同步阻塞** `requests`，跑在主线程。尤其 `_run_screener`（`/sampling-markets` 分页 × 每页最多 5 次重试 × 退避 2/4/6/8s × timeout 30s，再叠加 `analyze_orderbooks` 所有批次）最坏堵**几十秒到数分钟**，期间 `_check_pending_ops` / `_check_pending_sells` 仍会停摆。第一小步只改了调度粒度，未解除阻塞——留给第二小步后台化。
 
 ---
 
@@ -181,24 +187,28 @@ while running:
 
 分两轮推进，每轮可单独验证 + commit/push。
 
-### 第一轮 —— H1：主循环重构 + 重任务后台化（本轮）
+### 第一轮 —— H1：主循环重构 + 重任务后台化
 
-**目标**：让主线程永不被周期 REST 堵死，为第二轮 WSS 实时响应打基础。同时**保住"主线程独占 `_markets` 无锁"这一核心不变量**。
+分两小步，每步单独 commit + 服务器验证后再进下一步。同时**保住"主线程独占 `_markets` 无锁"这一核心不变量**。
 
-**设计**：
+#### 第一小步 ✅ 已完成：单一 1s tick + 独立计时器
 
-1. **单一 1s tick 主循环**：删除内层 `for _ in range(10)`。主循环每 1s 转一圈，各周期任务用**独立计时器**（`now - last_x >= interval_x`）判断是否到期，粒度回到真正的 1s。
+删除内层 `for _ in range(10)`，改用 `PeriodicScheduler`：主循环每 1s 转一圈，各周期任务独立计时器判断到期。**只改调度粒度，任务仍同步阻塞执行**（问题 A 不变）。修掉问题 B（poll 回到 3s 粒度）。纯调度逻辑抽成 `scheduler.py`，`tests/test_scheduler.py` 6 例本地验证。
 
-2. **重 REST 任务后台化，且"只算不写"**：
+**验证**：本地 pytest 全过；服务器上 `guardian.log` 中 `[POLL]` 日志间隔应回到 ~3s（无 screener 阻塞时），各任务按各自间隔出现。
+
+#### 第二小步 ⏳ 待做：重 REST 后台化「只算不写」
+
+1. **重 REST 任务后台化，且"只算不写"**：
    `_run_screener` / `discover` / `audit` / `check_positions` / `_poll_best_bids` 改为**后台线程执行纯查询/计算**，产出一个"结果对象"（如筛选目标列表、超价待撤 token、待挂卖单等），**丢回主线程的结果队列**，由 1s tick 取出后应用到 `_markets`。后台线程**绝不直接读写 `_markets`**。
 
-3. **单飞（single-flight）**：每类后台任务同一时刻最多一个在跑。到期时若上一个还没结束，跳过本次触发（避免 screener 慢时堆叠线程）。
+2. **单飞（single-flight）**：每类后台任务同一时刻最多一个在跑。到期时若上一个还没结束，跳过本次触发（避免 screener 慢时堆叠线程）。
 
-4. **主线程 1s tick 只做轻活**：应用后台结果、`_check_pending_ops`、`_check_pending_sells`、`_check_cooldowns`。全部非阻塞，毫秒级完成。
+3. **主线程 1s tick 只做轻活**：应用后台结果、`_check_pending_ops`、`_check_pending_sells`、`_check_cooldowns`。全部非阻塞，毫秒级完成。
 
-5. **顺带修 `_pending_ops` 竞态**：即时卖单线程不再直接 `append`，改为把"待挂卖单请求"放进结果队列，由主线程统一 append 到 `_pending_ops`。恢复"只有主线程碰 `_pending_ops`"。
+4. **顺带修 `_pending_ops` 竞态**：即时卖单线程不再直接 `append`，改为把"待挂卖单请求"放进结果队列，由主线程统一 append 到 `_pending_ops`。恢复"只有主线程碰 `_pending_ops`"。
 
-**验证**：日志中各周期任务按各自间隔跑；screener 慢时即时卖单/撤单回写不再被拖延；`_pending_ops` 无跨线程写入。
+**验证**：screener 慢时即时卖单/撤单回写不再被拖延；`_pending_ops` 无跨线程写入。
 
 ### 第二轮 —— WSS 实时（下一轮）
 
