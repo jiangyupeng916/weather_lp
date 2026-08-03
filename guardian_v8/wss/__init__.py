@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""wss — Polymarket 市场频道 WebSocket + 完整 bot 包。
+"""wss — Polymarket 市场频道 WebSocket 组件包。
 
-独立运行（完整 bot，替代 python main.py）:
-    python -m wss.main   (从项目根目录执行，加载 wss/.env.wss)
+仅提供市场频道 WS 连接管理与 bid 缓存，供 guardian.py 直接集成（A2 方案）。
+旧的独立 bot（GuardianWss / WssGuard / wss.main）已移除——
+Guardian 直接持有 MarketWS，主线程独占 _markets 无锁的不变量由 Guardian 保证。
 
-模块导入（可选，适合集成/测试场景）:
-    from wss import BidCache, MarketWS, WssGuard, GuardianWss
+    from wss import BidCache, MarketWS
 """
 
 from .cache import BidCache
 from .market_ws import MarketWS
-from .guard import WssGuard
-from .guardian_wss import GuardianWss
 
-__all__ = ["BidCache", "MarketWS", "WssGuard", "GuardianWss"]
+__all__ = ["BidCache", "MarketWS"]

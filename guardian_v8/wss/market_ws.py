@@ -163,6 +163,15 @@ class MarketWS:
         with self._subscribed_ids_lock:
             return set(self._subscribed_ids)
 
+    def is_connected(self) -> bool:
+        """当前是否有活跃连接（主线程用于断线检测）。
+
+        _on_open 时置 self._ws=ws，_on_close/_watchdog 超时时置 None，
+        均在 _ws_lock 保护下——此处同锁读取，线程安全。
+        """
+        with self._ws_lock:
+            return self._ws is not None
+
     # ── 内部：发送 ───────────────────────────────────────────────────────────
 
     def _send(self, msg: str) -> bool:

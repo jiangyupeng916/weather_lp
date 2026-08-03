@@ -229,11 +229,17 @@ while running:
 
 **验证**：本地 `py_compile` + 12 例 pytest（scheduler 6 + background 6）全过。服务器上 screener 慢时 `[POLL]`/`[SELL-TRIGGER]`/`[LIMIT SELL]` 回写不再被拖延；`_pending_ops` 无跨线程写入。
 
-**已知遗留**：`wss/guardian_wss.py` 覆盖并 `super()._poll_best_bids()`，该方法已改名 → 该子类现已失效。但它无入口点（`python -m wss.main` 不存在，从不运行），第二轮 WSS 融入 `Guardian` 时一并删除。
+### 第二轮 —— WSS 实时 ✅ 已完成
 
-### 第二轮 —— WSS 实时（下一轮）
+将 `wss/market_ws.py` 的市场频道 WSS **融入 `Guardian`**（A2 直接集成，不再维护 `GuardianWss` 分裂分支）。已删死代码：`wss/guardian_wss.py`（覆盖已改名的 `_poll_best_bids`，早已失效）、`wss/guard.py`、`wss/main.py`；`wss/__init__.py` 精简为只导出 `BidCache, MarketWS`（打破 `wss → guardian → wss` 循环导入）。
 
-将 `wss/market_ws.py` 的市场频道 WSS **融入 `Guardian`**（不再维护 `GuardianWss` 分裂分支）：WSS 推 best_bid 变化 → 入队 → 主线程 1s tick 消费 → 触发撤单重挂；`_poll_best_bids` 降频到 30s 作**对账兜底**（用 REST 真值校正 WSS 缓存，兜住漏推送/订阅失效/连接假活）。卖单侧维持现状（REST 现查订单簿），`best_ask` 仍不启用。详见 LOGIC.md 第二轮小节。
+**数据面（A2）**：WS 子线程 `_enqueue_bid_change` 只把 bid 变化投 `_ws_bid_queue`（绝不碰 `_markets`）；主线程 tick `_process_ws_bids` drain 队列 → 调**共享** `_apply_bid_change(ms, tid, new_bid, new_ask=None)`。REST 路径 `_apply_poll_result` 也调同一 helper —— 两条路径物理上不可能再漂移（这正是旧子类翻车的教训）。WS 只推 bid（B1 bid-only），`new_ask=None` 不覆盖 `ms.best_ask`，由 REST 对账维持。REST `poll` 在 WS 启用时降到 30s（`ws_rest_reconcile_interval`）作兜底；`ws_sub_sync`（15s）对齐 `_markets` ↔ WS 订阅列表，启动播种后立即同步一次。
+
+**断线策略（B3，最保守）**：主线程 `_check_ws_connection` 检测 `is_connected()` 状态翻转。True→False 立即 `_batch_cancel` 全部 RESTING（防旧价被逆向成交），并由 `_check_cooldowns` 门禁暂停挂新单（断线期不在场）；重连后各市场随 120s 冷却自然重挂（不做惊群式全量重挂）。`WS_MARKET_ENABLED=false` 是 kill switch，一关即回退纯 3s REST 行为，无需改代码。
+
+**稳定性统计**：`_ws_disconnect_count` / `_ws_total_downtime` / `_ws_started_at` 主线程独占累计，`_log_ws_stats` 搭在 prune 任务里每 5min 输出 `[WS STATS] 断线N次 | 累计断线Xs | 运行Ys | 可用率Z%`，供 grep 判断是否需改用 B2（断线提速 REST）。
+
+**验证**：本地 `py_compile` + 31 例 pytest（scheduler 6 + background 6 + ws_market 19）全过；实盘市场频道 smoke test 已连通（订阅 30 市场、收到 30 条真实 bid 推送、BidCache 填满、25s 稳定、干净关闭）。
 
 ---
 
@@ -257,7 +263,7 @@ guardian_v8/
 ├── ws_router.py     # 用户频道 JSON 解析 → Guardian
 ├── guardian.py      # 主控 + 集中式状态 + 定时任务
 ├── screener/        # types.py / markets.py / clob.py
-├── wss/             # 未启用的市场频道 WSS（cache/market_ws/guardian_wss/guard）
+├── wss/             # 市场频道 WSS（cache.py=BidCache / market_ws.py=MarketWS），已融入 Guardian
 ├── diag_balance.py  # 诊断：余额查询对比（旧手搓REST vs SDK）
 ├── diag_ws_user.py  # 诊断：用户频道 WS 活测（只读）
 ├── ARCHITECTURE.md  # 本文件

@@ -36,6 +36,7 @@ from ws_manager import WSManager
 from ws_router import WSRouter
 from scheduler import PeriodicScheduler
 from background import BackgroundDispatcher
+from wss import BidCache, MarketWS
 
 logger = logging.getLogger("guardian")
 
@@ -74,6 +75,29 @@ class Guardian:
         self.ws_router = WSRouter(self)
         # 后台调度：重 REST（screener 等）「只算不写」，结果回主线程应用（H1 第二步）
         self._bg = BackgroundDispatcher()
+
+        # ── 市场频道 WebSocket（Round 2：A2 直接集成，非子类） ──────────────────
+        # WS 子线程只做一件事：把 bid 变化 put 进 _ws_bid_queue；所有 _markets
+        # 写入仍只在主线程 tick 里发生（保住「主线程独占 _markets 无锁」不变量）。
+        self._ws_enabled: bool = self.cfg.ws_market_enabled
+        self._bid_cache = BidCache()
+        self._market_ws = MarketWS(
+            cache=self._bid_cache,
+            url=self.cfg.ws_market_url,
+            reconnect_delay=self.cfg.ws_reconnect_delay,
+            ping_interval=self.cfg.market_ping_interval,
+            proxy_url=self.cfg.proxy_url,
+            on_bid_changed=self._enqueue_bid_change,
+        )
+        # 线程安全队列：WS 子线程写 → 主循环 _process_ws_bids 读
+        self._ws_bid_queue: "queue.Queue[Tuple[str, Decimal]]" = queue.Queue()
+        # 断线检测状态（主线程独占读写）
+        self._ws_was_connected: bool = False
+        # ── 连接稳定性统计（主线程独占，便于后期 grep 判断要否换 B2） ──────────
+        self._ws_disconnect_count: int = 0
+        self._ws_total_downtime: float = 0.0
+        self._ws_last_down_at: float = 0.0
+        self._ws_started_at: float = 0.0
 
         # ── 市场状态（集中式，主线程直读直写） ─────────────────────────────────
         self._markets: Dict[str, MarketState] = {}
@@ -372,11 +396,16 @@ class Guardian:
 
     # ── 定时检查 ──────────────────────────────────────────────────────────────
     def _check_cooldowns(self, now: float):
+        # B3 挂单门禁：WS 启用但当前断线 → 暂停挂新单（断线期不在场，防旧价被逆向吃）。
+        # 冷却计时不冻结——重连后到期的市场会在后续 tick 正常挂出。
+        ws_paused = self._ws_enabled and not self._market_ws.is_connected()
         for token_id, ms in list(self._markets.items()):
             if ms.state == ActorState.COOLING and now >= ms.cooldown_until:
                 if token_id in self._removed_by_screener:
                     ms.state = ActorState.STOPPED
                     ms.state_at = now
+                    continue
+                if ws_paused:
                     continue
                 self._trigger_place(token_id)
 
@@ -728,6 +757,52 @@ class Guardian:
                 items.extend(books)
         return items
 
+    def _apply_bid_change(self, ms: MarketState, token_id: str,
+                          new_bid: Decimal, new_ask: Optional[Decimal] = None
+                          ) -> Tuple[bool, bool]:
+        """【主线程】把单个市场的 best_bid 变化应用到状态机。
+
+        REST 轮询(_apply_poll_result)与 WS 推送(_process_ws_bids)共用此唯一逻辑，
+        确保两条路径永不漂移（这正是旧 guardian_wss 子类翻车的教训）。
+        仅主线程调用，写 _markets 无锁。调用方需在调用前完成
+        `not ms / ms.state is STOPPED` 门禁。
+
+        new_ask=None（WS 只推 bid, B1 bid-only）时不覆盖 ms.best_ask，
+        保留上次 REST 对账写入的 ask 值。
+
+        返回 (processed, needs_cancel)：
+          processed    —— 是否为一次有效更新（init 或 bid 变化），供日志计数
+          needs_cancel —— 该 token 是否需撤单（调用方收集后批量撤）
+        """
+        # 首次初始化 best_bid
+        if ms.best_bid is None:
+            ms.best_bid = new_bid
+            if new_ask is not None:
+                ms.best_ask = new_ask
+            logger.debug("[BID INIT] %s best_bid=%s", token_id[:16], new_bid)
+            return True, False
+
+        # bid 未变 → 无操作
+        if new_bid == ms.best_bid:
+            return False, False
+
+        # bid 变化 → 更新缓存并触发状态机
+        ms.best_bid = new_bid
+        if new_ask is not None:
+            ms.best_ask = new_ask
+        logger.debug("[BID] %s best_bid=%s state=%s",
+                     token_id[:16], new_bid, ms.state.name)
+
+        if ms.state is ActorState.RESTING:
+            return True, True
+        if ms.state is ActorState.NO_ORDER and ms.cooldown_until <= time.time():
+            if token_id in self._removed_by_screener:
+                ms.state = ActorState.STOPPED
+                ms.state_at = time.time()
+            else:
+                self._start_cooldown(ms, self.cfg.maker_cooldown)
+        return True, False
+
     def _apply_poll_result(self, items):
         """【主线程】应用 best_bid 变化：更新 ms、收集撤单、触发批量撤单。"""
         polled = 0
@@ -754,34 +829,109 @@ class Guardian:
             new_bid = safe_decimal(best_bid_str)
             new_ask = safe_decimal(best_ask_str)
 
-            if ms.best_bid is None:
-                ms.best_bid = new_bid
-                ms.best_ask = new_ask
-                logger.debug("[BID INIT] %s best_bid=%s", aid[:16], new_bid)
+            processed, needs_cancel = self._apply_bid_change(ms, aid, new_bid, new_ask)
+            if processed:
                 polled += 1
-                continue
-
-            if new_bid == ms.best_bid:
-                continue
-
-            ms.best_bid = new_bid
-            ms.best_ask = new_ask
-            logger.debug("[BID] %s best_bid=%s state=%s", aid[:16], new_bid, ms.state.name)
-            polled += 1
-
-            if ms.state is ActorState.RESTING:
+            if needs_cancel:
                 cancels.append(aid)
-            elif ms.state is ActorState.NO_ORDER and ms.cooldown_until <= time.time():
-                if aid in self._removed_by_screener:
-                    ms.state = ActorState.STOPPED
-                    ms.state_at = time.time()
-                else:
-                    self._start_cooldown(ms, self.cfg.maker_cooldown)
 
         if cancels:
             self._batch_cancel(cancels, "best_bid变化")
 
         logger.debug("[POLL] 轮询 %d 个 Actor", polled)
+
+    # ── 市场频道 WS（Round 2：毫秒级 bid 推送） ────────────────────────────────
+    def _enqueue_bid_change(self, token_id: str,
+                            old_bid: Optional[Decimal], new_bid: Decimal) -> None:
+        """【WS 子线程】bid 变化事件入队，由主线程 _process_ws_bids 消费。
+
+        WS 线程绝不碰 _markets——只投线程安全队列，保住主线程独占不变量。
+        """
+        self._ws_bid_queue.put((token_id, new_bid))
+
+    def _process_ws_bids(self) -> None:
+        """【主线程】drain WS bid 队列，应用到状态机（与 REST 共用 _apply_bid_change）。
+
+        WS 只推 bid（B1 bid-only），new_ask 传 None → 不覆盖 ms.best_ask，
+        由 30s REST 对账维持 ask 值。
+        """
+        cancels: List[str] = []
+        while True:
+            try:
+                token_id, new_bid = self._ws_bid_queue.get_nowait()
+            except queue.Empty:
+                break
+            ms = self._markets.get(token_id)
+            if not ms or ms.state is ActorState.STOPPED:
+                continue
+            _processed, needs_cancel = self._apply_bid_change(ms, token_id, new_bid, None)
+            if needs_cancel:
+                cancels.append(token_id)
+        if cancels:
+            self._batch_cancel(cancels, "WS bid变化")
+
+    def _sync_ws_subscriptions(self) -> None:
+        """【主线程】对齐 _markets 集合 ↔ MarketWS 订阅列表。
+
+        新市场（discover/screener/file 加入）→ 增订；移除的市场 → 退订。
+        MarketWS.subscribe_more/unsubscribe 线程安全；未连接时仅更新待订阅集合，
+        连接建立后由 on_open 自动全量重订。
+        """
+        if not self._ws_enabled:
+            return
+        current = set(self._markets.keys())
+        subscribed = self._market_ws.subscribed_ids()
+        to_sub = current - subscribed
+        to_unsub = subscribed - current
+        if to_sub:
+            self._market_ws.subscribe_more(list(to_sub))
+        if to_unsub:
+            self._market_ws.unsubscribe(list(to_unsub))
+        if to_sub or to_unsub:
+            logger.debug("[WS SUB] 同步订阅: 当前%d个 +%d -%d",
+                         len(current), len(to_sub), len(to_unsub))
+
+    def _check_ws_connection(self, now: float) -> None:
+        """【主线程】检测 WS 连接状态翻转，处理断线撤单 + 稳定性统计。
+
+        B3 策略：连接 True→False 的那一刻立即撤全部 RESTING（防逆向成交），
+        断线期由 _check_cooldowns 门禁暂停挂新单，重连后随冷却自然重挂。
+        统计字段仅主线程读写，无锁安全。
+        """
+        if not self._ws_enabled:
+            return
+        connected = self._market_ws.is_connected()
+        if self._ws_was_connected and not connected:
+            # 断线沿：撤全部活跃挂单
+            self._ws_disconnect_count += 1
+            self._ws_last_down_at = now
+            resting = [tid for tid, ms in self._markets.items()
+                       if ms.state is ActorState.RESTING and ms.active_id]
+            logger.warning("[WS断线] 第%d次断线，撤全部 %d 个挂单，暂停挂新单",
+                           self._ws_disconnect_count, len(resting))
+            if resting:
+                self._batch_cancel(resting, "WS断线")
+        elif not self._ws_was_connected and connected:
+            # 重连沿：累加本次断线时长
+            if self._ws_last_down_at > 0.0:
+                self._ws_total_downtime += now - self._ws_last_down_at
+                logger.info("[WS RECONNECT] 断线 %.1fs 后恢复，将随冷却重挂",
+                            now - self._ws_last_down_at)
+                self._ws_last_down_at = 0.0
+        self._ws_was_connected = connected
+
+    def _log_ws_stats(self) -> None:
+        """【主线程】输出 WS 连接稳定性汇总（搭在 prune 任务里，5min 一条）。"""
+        if not self._ws_enabled or self._ws_started_at <= 0.0:
+            return
+        uptime = time.time() - self._ws_started_at
+        downtime = self._ws_total_downtime
+        # 若当前正处于断线中，把进行中的这段也算进去
+        if self._ws_last_down_at > 0.0:
+            downtime += time.time() - self._ws_last_down_at
+        avail = (uptime - downtime) / uptime * 100 if uptime > 0 else 0.0
+        logger.info("[WS STATS] 断线 %d 次 | 累计断线 %.0fs | 运行 %.0fs | 可用率 %.1f%%",
+                    self._ws_disconnect_count, downtime, uptime, avail)
 
     # ── 持仓查询 ──────────────────────────────────────────────────────────────
     def positions(self) -> List[dict]:
@@ -1327,11 +1477,19 @@ class Guardian:
             on_message=self.ws_router.on_user_message,
         )
 
+        # 2b. 启动市场频道 WS（Round 2：毫秒级 bid 推送；kill switch 关闭时跳过）
+        if self._ws_enabled:
+            self._ws_started_at = time.time()
+            self._market_ws.start()
+
         # 3. 发现已有订单（启动阶段主线程同步执行一次，播种 _markets 后再进主循环）
         try:
             self._apply_discover_result(self._discover_fetch())
         except Exception as e:
             logger.error("[DISCOVER] 启动发现失败: %s", e)
+
+        # 3b. 播种后立即同步一次订阅，把已发现的市场订上（不必等首个 sub_sync 周期）
+        self._sync_ws_subscriptions()
 
         # 4. 主循环（H1 第一步：单一 1s tick + 独立计时器）
         #    调度粒度回到真正的 1s —— poll 不再被旧的内层 10×1s 循环拖成 ~10s。
@@ -1360,14 +1518,25 @@ class Guardian:
                       lambda: self._bg.submit("discover", self._discover_fetch))
         # poll：token_ids 快照在主线程取（此 lambda 由 scheduler.tick 在主线程调用），
         # 传给后台 _poll_fetch 查 /books；结果由 _apply_poll_result 应用。
-        scheduler.add("poll", self.cfg.best_bid_poll_interval,
+        # WS 启用时 poll 降到 30s 仅做对账兜底；关闭时保持 3s 作为唯一数据源。
+        poll_interval = (self.cfg.ws_rest_reconcile_interval
+                         if self._ws_enabled else self.cfg.best_bid_poll_interval)
+        scheduler.add("poll", poll_interval,
                       lambda: self._bg.submit("poll", self._poll_fetch,
                                               list(self._markets.keys())))
         scheduler.add("audit", self.cfg.audit_interval,
                       lambda: self._bg.submit("audit", self._audit_fetch))
         scheduler.add("position", self.cfg.position_interval,
                       lambda: self._bg.submit("position", self.check_positions))
-        scheduler.add("prune", self.cfg.cache_prune_interval, self._prune_caches)
+        # ws_sub_sync：定期对齐 _markets ↔ WS 订阅列表（新增/移除市场）
+        if self._ws_enabled:
+            scheduler.add("ws_sub_sync", self.cfg.ws_sub_sync_interval,
+                          self._sync_ws_subscriptions)
+
+        def _prune_and_ws_stats():
+            self._prune_caches()
+            self._log_ws_stats()
+        scheduler.add("prune", self.cfg.cache_prune_interval, _prune_and_ws_stats)
 
         while self.running:
             try:
@@ -1375,6 +1544,8 @@ class Guardian:
                 scheduler.tick()
                 # 每 tick 必做的轻活（非阻塞，毫秒级）
                 now = time.time()
+                self._check_ws_connection(now)    # WS 断线检测 + 撤单 + 统计（在挂单门禁之前）
+                self._process_ws_bids()           # 消费 WS 毫秒级 bid 推送
                 self._check_cooldowns(now)
                 self._check_pending_ops(now)      # 回写撤单/挂单结果
                 self._check_pending_sells()       # 消费 BUY 成交即时卖单队列
@@ -1410,6 +1581,11 @@ class Guardian:
 
         # 停止后台调度器（纯计算任务，不必等待收尾）
         self._bg.shutdown(wait=False)
+
+        # 停止市场频道 WS
+        if self._ws_enabled:
+            self._market_ws.stop()
+            self._market_ws.join(timeout=3.0)
 
         # 一次 API 调用取消所有活跃订单
         fut = self.exec_layer.cancel_all("系统关闭")

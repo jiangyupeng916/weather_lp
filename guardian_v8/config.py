@@ -97,6 +97,21 @@ class Config:
     ws_reconnect_delay: float = 5.0
     user_ping_interval: float = 50.0
 
+    # ── 市场频道 WebSocket（Round 2：bid 毫秒级推送 + REST 30s 对账 + 断线撤单） ──
+    # kill switch：置 false 立即回退到纯 REST 3s 轮询（今日行为），无需改代码。
+    ws_market_enabled: bool = field(
+        default_factory=lambda: os.environ.get("WS_MARKET_ENABLED", "true").lower()
+        not in ("false", "0", "no", "off")
+    )
+    ws_market_url: str = os.environ.get(
+        "WS_MARKET_URL", "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    )
+    market_ping_interval: float = float(os.environ.get("MARKET_PING_INTERVAL", "10"))
+    # 主线程每隔多久对齐一次 _markets ↔ WS 订阅列表
+    ws_sub_sync_interval: float = 15.0
+    # WS 启用时 REST 降频到此间隔只做兜底对账（禁用时用 best_bid_poll_interval=3s）
+    ws_rest_reconcile_interval: float = 30.0
+
     # ── 心跳 (Heartbeat) ─────────────────────────────────────────────────────
     heartbeat_interval: float = 7.0
     heartbeat_max_errors: int = 3
