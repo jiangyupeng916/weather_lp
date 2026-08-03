@@ -347,12 +347,9 @@ class MarketWS:
         if not asset_id:
             return
 
+        # bid-only 策略：WS 只推 bid，ask 由 30s REST 对账维持，此处不解析 asks。
         bids = data.get("bids", [])
-        asks = data.get("asks", [])
-
         new_bid = _to_decimal(bids[-1].get("price") if bids else None)
-        new_ask = _to_decimal(asks[0].get("price") if asks else None)
-
         if new_bid is None:
             return
 
@@ -383,16 +380,17 @@ class MarketWS:
         if not changes:
             return
 
-        # 只取第一个 change（订阅单 token 时通常只有一个）
-        change = changes[0]
-        asset_id = change.get("asset_id", "")
-        if not asset_id:
-            return
+        # 遍历所有 change：一条消息可能同时带多个 token 的变动（如同一 market
+        # 的 YES/NO 两个 token），只取 changes[0] 会漏掉其余 token 的实时撤单。
+        for change in changes:
+            asset_id = change.get("asset_id", "")
+            if not asset_id:
+                continue
 
-        new_bid = _to_decimal(change.get("best_bid"))
-        if new_bid is None:
-            return
+            new_bid = _to_decimal(change.get("best_bid"))
+            if new_bid is None:
+                continue
 
-        old_bid, changed = self._cache.update(asset_id, new_bid)
-        if changed and self._on_bid_changed_cb:
-            self._on_bid_changed_cb(asset_id, old_bid, new_bid)
+            old_bid, changed = self._cache.update(asset_id, new_bid)
+            if changed and self._on_bid_changed_cb:
+                self._on_bid_changed_cb(asset_id, old_bid, new_bid)
