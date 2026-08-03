@@ -462,6 +462,16 @@ class Guardian:
                     logger.error("[AUDIT] 重复买单撤销异常")
                 continue
 
+            # 孤儿订单清理（audit 发起，token 已不在 _markets，只打日志）
+            if op == "orphan_cancel":
+                if isinstance(result, dict):
+                    canceled = result.get("canceled", [])
+                    logger.info("[AUDIT] 孤儿订单撤销完成: %d 成功 / %d 请求",
+                                len(canceled), len(meta.get("order_ids", [])))
+                else:
+                    logger.error("[AUDIT] 孤儿订单撤销异常")
+                continue
+
             # 卖单结果只打日志、不改状态机（卖出走 _selling 独立跟踪，与 _markets 状态机无关）。
             # 放在 ms 门禁之前：持仓 token 常不在 _markets 里，若门禁拦掉会静默丢失卖单确认日志。
             if op in ("limit_sell", "limit_sell_triggered"):
@@ -1148,8 +1158,29 @@ class Guardian:
                 )
                 self._trigger_cancel(token_id, "审计重试撤单(筛选器已移除)")
 
-        logger.debug("[AUDIT] 完成 %d 买单检查 | 纠偏 %d 个 | 重复 %d 个",
-                     len(buys), len(overpriced), len(dup_oids))
+        # ── 孤儿订单清理：筛选器已移除且已从 _markets pop，但订单仍活在交易所 ──
+        # discover 把这些订单甩给 audit（pop 后不在 _markets），而上面的 _markets
+        # 循环够不着它们 → 直接扫 open_orders，凡 token 在 _removed_by_screener
+        # 但不在 _markets 的一律撤。避免 discover/audit 互相等待的死循环孤儿单。
+        inflight_orphan_oids: Set[str] = set()
+        for _fut, _tid, _op, _meta in self._pending_ops:
+            if _op == "orphan_cancel":
+                inflight_orphan_oids.update(_meta.get("order_ids", []))
+        orphan_oids = [
+            o.order_id for o in buys
+            if o.token_id in self._removed_by_screener
+            and o.token_id not in self._markets
+            and o.order_id not in inflight_orphan_oids
+        ]
+        if orphan_oids:
+            logger.warning("[AUDIT] 检测到 %d 份孤儿订单（已移除市场仍挂单），撤销",
+                           len(orphan_oids))
+            fut = self.exec_layer.cancel_batch(orphan_oids, "孤儿订单清理")
+            self._pending_ops.append((fut, "_orphans_", "orphan_cancel",
+                                      {"order_ids": orphan_oids}))
+
+        logger.debug("[AUDIT] 完成 %d 买单检查 | 纠偏 %d 个 | 重复 %d 个 | 孤儿 %d 个",
+                     len(buys), len(overpriced), len(dup_oids), len(orphan_oids))
 
     # ── 交易处理 ──────────────────────────────────────────────────────────────
     def handle_trade(self, data: dict):
