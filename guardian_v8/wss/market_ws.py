@@ -287,6 +287,14 @@ class MarketWS:
         except json.JSONDecodeError:
             return
 
+        # 临时诊断：打印前 3 条消息的完整结构，看清 Polymarket 实际格式
+        if not hasattr(self, "_debug_sample_count"):
+            self._debug_sample_count = 0
+        if self._debug_sample_count < 3:
+            self._debug_sample_count += 1
+            logger.info("[MarketWS DEBUG] 消息样本 #%d: %s",
+                        self._debug_sample_count, json.dumps(data, ensure_ascii=False)[:500])
+
         # 临时诊断：记录收到的消息类型分布（每 100 条汇总一次，避免刷屏）
         msg_type = data.get("type", "unknown")
         if not hasattr(self, "_msg_type_counter"):
