@@ -746,27 +746,19 @@ class Guardian:
     def onchain_balance(self, token_id: str) -> float:
         """查询条件代币链上余额。
 
-        V8：新 SDK 未提供等价的 get_balance_allowance 方法，改用 raw REST。
-        无需 L2 签名头（此端点仅需 POLY_ADDRESS 查询）。
+        V8.1：改用 SDK get_balance_allowance（内部正确签 L2 头）。
+        旧实现手搓 REST 只发 POLY_ADDRESS → 该端点需完整 L2 签名 → 恒 401 →
+        静默返回 0.0，导致 check_positions / _sell_single_position 全部跳过，
+        持仓永远挂不出卖单。BalanceAllowance.balance 为 base units（1e6）。
         """
         try:
-            r = requests.get(
-                f"{self.cfg.host}/balance-allowance",
-                params={
-                    "asset_type": "CONDITIONAL",
-                    "token_id": token_id,
-                },
-                headers={"POLY_ADDRESS": self.address},
-                timeout=10,
+            ba = self.client.get_balance_allowance(
+                asset_type="CONDITIONAL",
+                token_id=token_id,
             )
-            if r.status_code != 200:
-                return 0.0
-            val = r.json().get("balance")
-            if val is None:
-                return 0.0
-            return int(val) / 1_000_000
+            return ba.balance / 1_000_000
         except Exception as e:
-            logger.error("余额查询失败: %s", e)
+            logger.error("余额查询失败 %s...: %s", token_id[:20], e)
             return 0.0
 
     # ── 审计 ──────────────────────────────────────────────────────────────────
