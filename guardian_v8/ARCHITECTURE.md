@@ -153,13 +153,14 @@ H1 第一小步已落地：单一 1s tick + `PeriodicScheduler` 独立计时器�
 
 ```python
 # guardian.run() 简化（scheduler.py: PeriodicScheduler + background.py: BackgroundDispatcher）
-bg_handlers = {"screener": _apply_screener_result}   # 后台任务名 → 主线程应用处理器
+bg_handlers = {"screener": _apply_screener_result,   # 后台任务名 → 主线程应用处理器
+               "discover": _apply_discover_result}
 
 scheduler = PeriodicScheduler()
-# screener：到期时提交到后台（只算不写），单飞——上一次没跑完就跳过本次
+# screener / discover：到期时提交到后台（只算不写），单飞——上一次没跑完就跳过本次
 scheduler.add("screener", 30,  lambda: _bg.submit("screener", _screener_fetch),
               run_immediately=True)
-scheduler.add("discover", 30,  discover)                              # 仍同步阻塞 REST（待迁）
+scheduler.add("discover", 30,  lambda: _bg.submit("discover", _discover_fetch))  # 已后台化
 scheduler.add("poll",     3,   _poll_best_bids)                       # 仍同步阻塞 REST（待迁）
 scheduler.add("audit",    120, audit)                                 # 仍同步阻塞 REST（待迁）
 scheduler.add("position", 120, check_positions)                       # 仍同步阻塞 REST（待迁）
@@ -184,8 +185,8 @@ while running:
 **问题 B — best_bid 轮询实际约 10s 而非 3s ✅ 已修（第一小步）**
 旧代码内层 `for _ in range(10): time.sleep(1)` 固定占 ~10s，外层计时器每 ~10s 才求值一次，`best_bid_poll_interval=3.0` 永远达不到。改单一 1s tick 后，各计时器每 1s 求值，poll 回到真正的 3s 粒度（无阻塞时）。
 
-**问题 A — 阻塞 REST 冻结状态机 ⏳ 第二小步进行中（screener 已后台化）**
-最重的 `screener`（`/sampling-markets` 分页 × 每页最多 5 次重试 × 退避 2/4/6/8s × timeout 30s，再叠加 `analyze_orderbooks` 所有批次，最坏堵**几十秒到数分钟**）已拆为后台 `_screener_fetch`（只算不写）+ 主线程 `_apply_screener_result`（写 `_markets`），经 `BackgroundDispatcher` 单飞调度、结果队列回传。`discover` / `_poll_best_bids` / `audit` / `check_positions` 仍同步阻塞，待逐个按同一模式迁移。
+**问题 A — 阻塞 REST 冻结状态机 ⏳ 第二小步进行中（screener + discover 已后台化）**
+最重的 `screener`（`/sampling-markets` 分页 × 每页最多 5 次重试 × 退避 2/4/6/8s × timeout 30s，再叠加 `analyze_orderbooks` 所有批次，最坏堵**几十秒到数分钟**）已拆为后台 `_screener_fetch`（只算不写）+ 主线程 `_apply_screener_result`（写 `_markets`）。`discover` 同样拆为后台 `_discover_fetch`（只发 `open_orders()` 分页查询）+ 主线程 `_apply_discover_result`（STOPPED 清理 + 新市场注册 + CSV 同步）。两者均经 `BackgroundDispatcher` 单飞调度、结果队列回传。`_poll_best_bids` / `audit` / `check_positions` 仍同步阻塞，待逐个按同一模式迁移。
 
 ---
 
@@ -205,15 +206,17 @@ while running:
 
 #### 第二小步 ⏳ 进行中：重 REST 后台化「只算不写」
 
-基础设施 + screener 迁移已落地，其余任务待逐个迁移。
+基础设施 + screener + discover 迁移已落地，其余任务待逐个迁移。
 
 1. **基础设施 `background.py`（`BackgroundDispatcher`）✅**：`ThreadPoolExecutor` + 结果队列 + 单飞注册表（锁保护的 `set`）。`submit(name, fn)` 同名在跑时返回 `False` 跳过本次；后台线程只跑纯函数，`(name, ok, result)` 入队；`drain()` 主线程非阻塞取出。异常统一在 `_run` 里捕获记录并作为失败结果入队。`tests/test_background.py` 6 例本地验证。
 
 2. **screener 后台化 ✅**：`_run_screener` 拆为后台 `_screener_fetch`（`fetch_and_filter` + `analyze_orderbooks` + 筛选 + 构建 targets，零 `_markets` 访问）+ 主线程 `_apply_screener_result`（`_apply_market_targets` 写 `_markets` + CSV + 日志）。scheduler 到期时 `self._bg.submit("screener", self._screener_fetch)`；1s tick 末尾 `_drain_background(bg_handlers)` 取结果并按任务名分派给主线程处理器。
 
-3. **其余任务待迁移 ⏳**：`discover` / `audit` / `check_positions` / `_poll_best_bids` 按同一「后台 fetch + 主线程 apply」模式逐个迁移。
+3. **discover 后台化 ✅**：`discover` 拆为后台 `_discover_fetch`（只调 `open_orders()`，唯一阻塞的 SDK 分页 REST，零 `_markets` 访问；返回 None 时抛异常由 dispatcher 记录）+ 主线程 `_apply_discover_result`（清理 STOPPED 市场 + 注册新市场 + `_sync_from_file` + 日志，全部写 `_markets`）。STOPPED 清理由「REST 前」移到「结果返回后」，对正确性无影响。首次触发仍在 `discover_interval` 后（不 `run_immediately`，与迁移前一致）。
 
-4. **顺带修 `_pending_ops` 竞态 ⏳**：即时卖单线程不再直接 `append`，改为把"待挂卖单请求"放进结果队列，由主线程统一 append 到 `_pending_ops`。恢复"只有主线程碰 `_pending_ops`"。
+4. **其余任务待迁移 ⏳**：`audit` / `check_positions` / `_poll_best_bids` 按同一「后台 fetch + 主线程 apply」模式逐个迁移。
+
+5. **顺带修 `_pending_ops` 竞态 ⏳**：即时卖单线程不再直接 `append`，改为把"待挂卖单请求"放进结果队列，由主线程统一 append 到 `_pending_ops`。恢复"只有主线程碰 `_pending_ops`"。
 
 **验证**：screener 慢时即时卖单/撤单回写不再被拖延；`_pending_ops` 无跨线程写入。
 

@@ -625,19 +625,27 @@ class Guardian:
         os.replace(csv_tmp, csv_path)
 
     # ── 订单发现 ──────────────────────────────────────────────────────────────
-    def discover(self):
-        # 清理 STOPPED 状态市场（不依赖 open_orders）
+    def _discover_fetch(self):
+        """【后台线程】查询 open_orders，纯 REST，零 _markets 访问。
+
+        H1 第二小步：只发一次 list_open_orders 分页查询，返回 orders 列表。
+        open_orders() 返回 None 时抛异常 → BackgroundDispatcher 统一记录 ERROR。
+        结果由主线程 _apply_discover_result 应用。
+        """
+        orders = self.open_orders()
+        if orders is None:
+            raise RuntimeError("订单查询失败，本周期 discover 跳过")
+        return orders
+
+    def _apply_discover_result(self, orders):
+        """【主线程】应用 discover 结果：清理 STOPPED + 发现新市场 + CSV 同步 + 日志。"""
+        # 清理 STOPPED 状态市场（主线程独占写 _markets，无锁安全）
         stopped = [tid for tid, ms in self._markets.items() if ms.state == ActorState.STOPPED]
         for tid in stopped:
             self._markets.pop(tid, None)
             self._file_managed_ids.discard(tid)
             # 不清除 _removed_by_screener：防止 discover 重新加回孤儿订单
             logger.debug("[DISCOVER] 清理 STOPPED 市场 %s", tid[:20])
-
-        orders = self.open_orders()
-        if orders is None:
-            logger.error("[DISCOVER] 订单查询失败，跳过本周期")
-            return
 
         buys = {o.token_id: o for o in orders if o.side.upper() == "BUY"}
         now = time.time()
@@ -1282,6 +1290,7 @@ class Guardian:
         # 后台结果 → 主线程应用处理器（key = BackgroundDispatcher 任务名）
         bg_handlers = {
             "screener": self._apply_screener_result,
+            "discover": self._apply_discover_result,
         }
 
         scheduler = PeriodicScheduler()
@@ -1289,7 +1298,10 @@ class Guardian:
         scheduler.add("screener", self.cfg.screener_interval,
                       lambda: self._bg.submit("screener", self._screener_fetch),
                       run_immediately=True)
-        scheduler.add("discover", self.cfg.discover_interval, self.discover)
+        # discover：同上，只有 open_orders() REST 在后台跑，_markets 写入在主线程。
+        # 不 run_immediately——与迁移前一致，首次在 discover_interval 后触发。
+        scheduler.add("discover", self.cfg.discover_interval,
+                      lambda: self._bg.submit("discover", self._discover_fetch))
         scheduler.add("poll", self.cfg.best_bid_poll_interval, self._poll_best_bids)
         scheduler.add("audit", self.cfg.audit_interval, self.audit)
         scheduler.add("position", self.cfg.position_interval, self.check_positions)
