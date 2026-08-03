@@ -287,25 +287,6 @@ class MarketWS:
         except json.JSONDecodeError:
             return
 
-        # 临时诊断：打印前 3 条消息的完整结构，看清 Polymarket 实际格式
-        if not hasattr(self, "_debug_sample_count"):
-            self._debug_sample_count = 0
-        if self._debug_sample_count < 3:
-            self._debug_sample_count += 1
-            logger.info("[MarketWS DEBUG] 消息样本 #%d: %s",
-                        self._debug_sample_count, json.dumps(data, ensure_ascii=False)[:500])
-
-        # 临时诊断：记录收到的消息类型分布（每 100 条汇总一次，避免刷屏）
-        msg_type = data.get("type", "unknown") if isinstance(data, dict) else "array"
-        if not hasattr(self, "_msg_type_counter"):
-            self._msg_type_counter = {}
-            self._msg_total = 0
-        self._msg_type_counter[msg_type] = self._msg_type_counter.get(msg_type, 0) + 1
-        self._msg_total += 1
-        if self._msg_total % 100 == 0:
-            logger.info("[MarketWS DEBUG] 收到 %d 条消息，类型分布: %s",
-                        self._msg_total, dict(self._msg_type_counter))
-
         self._route(data)
 
     def _on_error(self, ws, error) -> None:
