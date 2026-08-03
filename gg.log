@@ -1,0 +1,581 @@
+2026-07-27 07:06:05,631 - INFO - ============================================================
+2026-07-27 07:06:05,632 - INFO - Maker-only Guardian V7.0 启动
+2026-07-27 07:06:05,632 - INFO - 地址: 0x304bf40e9e50c265f6dd86417707d5b41d8ea619 | 档: 2 | 量: 50 | 冷却: 120s | 心跳: 7.0s
+2026-07-27 07:06:05,632 - INFO - ============================================================
+2026-07-27 07:06:05,637 - INFO - [HEARTBEAT] 已启动 interval=7.0s
+2026-07-27 07:06:40,650 - INFO - [SCREENER] 127 markets in 4.8s | yes:36 no:16 | next in 30s
+2026-07-27 07:06:46,189 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:06:46,190 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:06:46,191 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:06:46,191 - ERROR - 获取订单簿失败: 46660099750970550763... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:06:46,191 - ERROR - 获取订单簿失败: 16949720003652052550... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:06:46,192 - ERROR - [PLACE FAIL] 1133572939724817... price=0.35 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:06:47,188 - WARNING - [RETRY] 4666009975097055 bids不足2档，10s后重试
+2026-07-27 07:06:47,194 - WARNING - [RETRY] 1694972000365205 bids不足2档，10s后重试
+2026-07-27 07:06:57,561 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:06:57,563 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:06:57,564 - ERROR - 获取订单簿失败: 46660099750970550763... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:06:57,564 - ERROR - 获取订单簿失败: 74964750875351688286... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:06:57,564 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:06:57,565 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:06:57,566 - ERROR - 获取订单簿失败: 89571736873030880544... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:06:57,565 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:06:57,567 - ERROR - 获取订单簿失败: 16949720003652052550... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:06:57,567 - ERROR - [PLACE FAIL] 3813359922360858... price=0.68 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:06:58,552 - WARNING - [RETRY] 4666009975097055 bids不足2档，10s后重试
+2026-07-27 07:06:58,558 - WARNING - [RETRY] 7496475087535168 bids不足2档，10s后重试
+2026-07-27 07:06:58,563 - WARNING - [RETRY] 8957173687303088 bids不足2档，10s后重试
+2026-07-27 07:06:58,564 - WARNING - [RETRY] 1694972000365205 bids不足2档，10s后重试
+2026-07-27 07:07:15,691 - INFO - [SCREENER] 128 markets in 3.8s | yes:34 no:17 | next in 30s
+2026-07-27 07:07:50,406 - INFO - [SCREENER] 129 markets in 3.5s | yes:37 no:19 | next in 30s
+2026-07-27 07:08:26,667 - INFO - [SCREENER] 129 markets in 3.3s | yes:39 no:19 | next in 30s
+2026-07-27 07:08:39,176 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:08:39,177 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:08:39,177 - ERROR - [PLACE FAIL] 4056485298084808... price=0.34 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:08:39,178 - ERROR - [PLACE FAIL] 1394146897913131... price=0.63 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:09:01,879 - INFO - [SCREENER] 127 markets in 3.6s | yes:40 no:16 | next in 30s
+2026-07-27 07:09:37,971 - INFO - [SCREENER] 126 markets in 4.3s | yes:41 no:17 | next in 30s
+2026-07-27 07:10:12,694 - INFO - [SCREENER] 126 markets in 3.1s | yes:39 no:14 | next in 30s
+2026-07-27 07:10:49,365 - INFO - [SCREENER] 127 markets in 3.6s | yes:38 no:15 | next in 30s
+2026-07-27 07:11:24,470 - INFO - [SCREENER] 127 markets in 3.9s | yes:39 no:13 | next in 30s
+2026-07-27 07:11:59,335 - INFO - [SCREENER] 128 markets in 3.7s | yes:40 no:13 | next in 30s
+2026-07-27 07:12:35,829 - INFO - [SCREENER] 127 markets in 5.0s | yes:41 no:13 | next in 30s
+2026-07-27 07:13:12,612 - INFO - [SCREENER] 130 markets in 3.7s | yes:43 no:15 | next in 30s
+2026-07-27 07:13:46,937 - INFO - [SCREENER] 130 markets in 3.2s | yes:45 no:14 | next in 30s
+2026-07-27 07:14:22,481 - INFO - [SCREENER] 127 markets in 4.1s | yes:46 no:18 | next in 30s
+2026-07-27 07:14:58,591 - INFO - [SCREENER] 128 markets in 3.4s | yes:47 no:16 | next in 30s
+2026-07-27 07:15:33,635 - INFO - [SCREENER] 128 markets in 3.7s | yes:49 no:17 | next in 30s
+2026-07-27 07:16:08,731 - INFO - [SCREENER] 128 markets in 3.7s | yes:50 no:17 | next in 30s
+2026-07-27 07:16:43,653 - INFO - [SCREENER] 128 markets in 3.5s | yes:53 no:17 | next in 30s
+2026-07-27 07:17:19,794 - INFO - [SCREENER] 130 markets in 3.1s | yes:53 no:14 | next in 30s
+2026-07-27 07:17:54,806 - INFO - [SCREENER] 129 markets in 3.4s | yes:53 no:14 | next in 30s
+2026-07-27 07:18:30,772 - INFO - [SCREENER] 128 markets in 4.4s | yes:54 no:13 | next in 30s
+2026-07-27 07:18:41,739 - ERROR - [py_clob_client_v2] request error: <ConnectionTerminated error_code:1, last_stream_id:13, additional_data:None>
+2026-07-27 07:18:41,740 - ERROR - 查询订单失败: PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:18:41,740 - WARNING - [AUDIT] 7101294439518353 订单丢失纠偏
+2026-07-27 07:18:41,741 - ERROR - [py_clob_client_v2] request error: <ConnectionTerminated error_code:1, last_stream_id:13, additional_data:None>
+2026-07-27 07:18:41,741 - WARNING - [AUDIT] 2516053342065208 订单丢失纠偏
+2026-07-27 07:18:41,741 - ERROR - [BATCH CANCEL ERR] 1 条 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:18:41,742 - WARNING - [AUDIT] 9489687472027505 订单丢失纠偏
+2026-07-27 07:18:41,742 - WARNING - [AUDIT] 1915443050348993 订单丢失纠偏
+2026-07-27 07:18:41,742 - WARNING - [AUDIT] 7028975518222497 订单丢失纠偏
+2026-07-27 07:18:41,742 - WARNING - [AUDIT] 8144221557173654 订单丢失纠偏
+2026-07-27 07:18:41,743 - WARNING - [AUDIT] 7722815841966251 订单丢失纠偏
+2026-07-27 07:18:41,743 - WARNING - [AUDIT] 1533506491177191 订单丢失纠偏
+2026-07-27 07:18:41,743 - WARNING - [AUDIT] 9812374390908265 订单丢失纠偏
+2026-07-27 07:18:41,743 - WARNING - [AUDIT] 1105534731429668 订单丢失纠偏
+2026-07-27 07:18:41,743 - WARNING - [AUDIT] 7496475087535168 订单丢失纠偏
+2026-07-27 07:18:41,743 - WARNING - [AUDIT] 1055875303810931 订单丢失纠偏
+2026-07-27 07:18:41,743 - WARNING - [AUDIT] 4008225144310427 订单丢失纠偏
+2026-07-27 07:18:41,743 - WARNING - [AUDIT] 2207063029591664 订单丢失纠偏
+2026-07-27 07:18:41,743 - WARNING - [AUDIT] 8957173687303088 订单丢失纠偏
+2026-07-27 07:18:41,743 - WARNING - [AUDIT] 8380580474490958 订单丢失纠偏
+2026-07-27 07:18:41,743 - WARNING - [AUDIT] 4299099818861514 订单丢失纠偏
+2026-07-27 07:18:41,744 - WARNING - [AUDIT] 9019759043072915 订单丢失纠偏
+2026-07-27 07:18:41,744 - WARNING - [AUDIT] 2059413484870737 订单丢失纠偏
+2026-07-27 07:18:41,744 - WARNING - [AUDIT] 8040868570402702 订单丢失纠偏
+2026-07-27 07:18:41,744 - WARNING - [AUDIT] 3813359922360858 订单丢失纠偏
+2026-07-27 07:18:41,744 - WARNING - [AUDIT] 7294321652115198 订单丢失纠偏
+2026-07-27 07:18:41,744 - WARNING - [AUDIT] 1073152975037832 订单丢失纠偏
+2026-07-27 07:18:41,744 - WARNING - [AUDIT] 2612298893776859 订单丢失纠偏
+2026-07-27 07:18:41,744 - WARNING - [AUDIT] 2314085681503223 订单丢失纠偏
+2026-07-27 07:18:41,744 - WARNING - [AUDIT] 1708432164233727 订单丢失纠偏
+2026-07-27 07:18:41,744 - WARNING - [AUDIT] 1024551408877687 订单丢失纠偏
+2026-07-27 07:18:41,745 - WARNING - [AUDIT] 9268736251335863 订单丢失纠偏
+2026-07-27 07:18:41,745 - WARNING - [AUDIT] 1694972000365205 订单丢失纠偏
+2026-07-27 07:18:41,745 - WARNING - [AUDIT] 6458838805006032 订单丢失纠偏
+2026-07-27 07:18:41,745 - WARNING - [AUDIT] 1068168590999466 订单丢失纠偏
+2026-07-27 07:18:41,745 - WARNING - [AUDIT] 3081912143587805 订单丢失纠偏
+2026-07-27 07:18:41,745 - WARNING - [AUDIT] 1126105863031871 订单丢失纠偏
+2026-07-27 07:18:41,745 - WARNING - [AUDIT] 2647317306157836 订单丢失纠偏
+2026-07-27 07:18:41,745 - WARNING - [AUDIT] 8161173925686401 订单丢失纠偏
+2026-07-27 07:18:41,745 - WARNING - [AUDIT] 4529678639700238 订单丢失纠偏
+2026-07-27 07:18:41,745 - WARNING - [AUDIT] 1306711952153612 订单丢失纠偏
+2026-07-27 07:18:41,745 - WARNING - [AUDIT] 5061466891472454 订单丢失纠偏
+2026-07-27 07:18:41,746 - WARNING - [AUDIT] 9168369715611961 订单丢失纠偏
+2026-07-27 07:18:41,746 - WARNING - [AUDIT] 3461568365354437 订单丢失纠偏
+2026-07-27 07:18:41,746 - WARNING - [AUDIT] 6693362690307318 订单丢失纠偏
+2026-07-27 07:18:41,746 - WARNING - [AUDIT] 8342774982335276 订单丢失纠偏
+2026-07-27 07:18:41,746 - WARNING - [AUDIT] 7914256100489361 订单丢失纠偏
+2026-07-27 07:18:41,746 - WARNING - [AUDIT] 1231214294561282 订单丢失纠偏
+2026-07-27 07:18:41,746 - WARNING - [AUDIT] 3023609921040208 订单丢失纠偏
+2026-07-27 07:18:41,746 - WARNING - [AUDIT] 1122124489018208 订单丢失纠偏
+2026-07-27 07:18:41,746 - WARNING - [AUDIT] 9720420655027725 订单丢失纠偏
+2026-07-27 07:18:41,746 - WARNING - [AUDIT] 7813483423652412 订单丢失纠偏
+2026-07-27 07:18:41,746 - WARNING - [AUDIT] 2153524962099834 订单丢失纠偏
+2026-07-27 07:18:41,746 - WARNING - [AUDIT] 4115700831945714 订单丢失纠偏
+2026-07-27 07:18:41,747 - WARNING - [AUDIT] 9968205677236143 订单丢失纠偏
+2026-07-27 07:18:41,747 - WARNING - [AUDIT] 8359989294445929 订单丢失纠偏
+2026-07-27 07:18:41,747 - WARNING - [AUDIT] 8837123662738760 订单丢失纠偏
+2026-07-27 07:18:41,747 - WARNING - [AUDIT] 1007257428517780 订单丢失纠偏
+2026-07-27 07:18:41,747 - WARNING - [AUDIT] 6625946330016938 订单丢失纠偏
+2026-07-27 07:18:41,747 - WARNING - [AUDIT] 8294972998917617 订单丢失纠偏
+2026-07-27 07:18:41,747 - WARNING - [AUDIT] 6718004052598008 订单丢失纠偏
+2026-07-27 07:18:41,747 - WARNING - [AUDIT] 5473705433421184 订单丢失纠偏
+2026-07-27 07:18:41,747 - WARNING - [AUDIT] 3543561891537680 订单丢失纠偏
+2026-07-27 07:18:41,747 - WARNING - [AUDIT] 4056485298084808 订单丢失纠偏
+2026-07-27 07:18:41,747 - WARNING - [AUDIT] 1062032991491342 订单丢失纠偏
+2026-07-27 07:18:41,747 - WARNING - [AUDIT] 5528339516718035 订单丢失纠偏
+2026-07-27 07:18:42,637 - ERROR - [BATCH CANCEL] 6840743584459619 取消失败，清空 active_id 进入冷却兜底
+2026-07-27 07:19:06,246 - INFO - [SCREENER] 130 markets in 3.3s | yes:57 no:13 | next in 30s
+2026-07-27 07:19:41,510 - INFO - [SCREENER] 131 markets in 4.0s | yes:51 no:16 | next in 30s
+2026-07-27 07:20:16,179 - INFO - [SCREENER] 130 markets in 3.3s | yes:51 no:17 | next in 30s
+2026-07-27 07:20:42,307 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:20:42,310 - ERROR - 获取订单簿失败: 74964750875351688286... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:20:42,312 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:20:42,313 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:20:42,313 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:20:42,313 - ERROR - 获取订单簿失败: 89571736873030880544... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:20:42,314 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:20:42,314 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:20:42,316 - ERROR - 获取订单簿失败: 22070630295916640502... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:20:42,317 - ERROR - 获取订单簿失败: 83805804744909584132... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:20:42,319 - ERROR - 获取订单簿失败: 10558753038109319582... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:20:42,319 - ERROR - 获取订单簿失败: 40082251443104278157... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:20:43,040 - WARNING - [RETRY] 7496475087535168 bids不足2档，10s后重试
+2026-07-27 07:20:43,040 - WARNING - [RETRY] 1055875303810931 bids不足2档，10s后重试
+2026-07-27 07:20:43,040 - WARNING - [RETRY] 4008225144310427 bids不足2档，10s后重试
+2026-07-27 07:20:43,041 - WARNING - [RETRY] 2207063029591664 bids不足2档，10s后重试
+2026-07-27 07:20:43,041 - WARNING - [RETRY] 8957173687303088 bids不足2档，10s后重试
+2026-07-27 07:20:43,041 - WARNING - [RETRY] 8380580474490958 bids不足2档，10s后重试
+2026-07-27 07:20:51,426 - INFO - [SCREENER] 128 markets in 3.4s | yes:48 no:17 | next in 30s
+2026-07-27 07:21:27,994 - INFO - [SCREENER] 129 markets in 3.7s | yes:50 no:18 | next in 30s
+2026-07-27 07:22:03,671 - INFO - [SCREENER] 129 markets in 4.3s | yes:48 no:17 | next in 30s
+2026-07-27 07:22:39,995 - INFO - [SCREENER] 129 markets in 4.9s | yes:50 no:17 | next in 30s
+2026-07-27 07:23:17,376 - INFO - [SCREENER] 129 markets in 4.0s | yes:50 no:16 | next in 30s
+2026-07-27 07:23:29,496 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:23:29,497 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:23:29,497 - ERROR - 获取订单簿失败: 99414330674225122069... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:23:29,497 - ERROR - [PLACE FAIL] 1060033277818254... price=0.63 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:23:30,492 - WARNING - [RETRY] 9941433067422512 bids不足2档，10s后重试
+2026-07-27 07:23:52,959 - INFO - [SCREENER] 130 markets in 4.1s | yes:52 no:16 | next in 30s
+2026-07-27 07:24:27,805 - INFO - [SCREENER] 131 markets in 3.2s | yes:48 no:16 | next in 30s
+2026-07-27 07:25:03,557 - INFO - [SCREENER] 132 markets in 3.9s | yes:50 no:15 | next in 30s
+2026-07-27 07:25:16,252 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:25:16,252 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 07:25:16,252 - ERROR - 获取订单簿失败: 17084321642337271438... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:25:16,253 - ERROR - [PLACE FAIL] 9246919199388356... price=0.33 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:25:17,246 - WARNING - [RETRY] 1708432164233727 bids不足2档，10s后重试
+2026-07-27 07:25:40,529 - INFO - [SCREENER] 130 markets in 3.9s | yes:50 no:15 | next in 30s
+2026-07-27 07:26:16,173 - INFO - [SCREENER] 130 markets in 4.4s | yes:49 no:17 | next in 30s
+2026-07-27 07:26:51,444 - INFO - [SCREENER] 130 markets in 4.1s | yes:46 no:18 | next in 30s
+2026-07-27 07:27:27,617 - INFO - [SCREENER] 129 markets in 3.1s | yes:47 no:19 | next in 30s
+2026-07-27 07:28:02,624 - INFO - [SCREENER] 129 markets in 3.1s | yes:46 no:16 | next in 30s
+2026-07-27 07:28:37,953 - INFO - [SCREENER] 129 markets in 3.9s | yes:45 no:16 | next in 30s
+2026-07-27 07:29:12,887 - INFO - [SCREENER] 127 markets in 3.3s | yes:45 no:18 | next in 30s
+2026-07-27 07:29:49,424 - INFO - [SCREENER] 127 markets in 3.2s | yes:46 no:18 | next in 30s
+2026-07-27 07:30:24,542 - INFO - [SCREENER] 128 markets in 3.6s | yes:45 no:18 | next in 30s
+2026-07-27 07:30:59,407 - INFO - [SCREENER] 125 markets in 3.4s | yes:46 no:18 | next in 30s
+2026-07-27 07:31:36,552 - INFO - [SCREENER] 124 markets in 3.6s | yes:52 no:18 | next in 30s
+2026-07-27 07:32:11,370 - INFO - [SCREENER] 125 markets in 3.6s | yes:50 no:17 | next in 30s
+2026-07-27 07:32:45,957 - INFO - [SCREENER] 127 markets in 3.2s | yes:49 no:16 | next in 30s
+2026-07-27 07:33:21,385 - INFO - [SCREENER] 125 markets in 3.4s | yes:46 no:22 | next in 30s
+2026-07-27 07:33:58,677 - INFO - [SCREENER] 126 markets in 4.0s | yes:48 no:21 | next in 30s
+2026-07-27 07:34:33,670 - INFO - [SCREENER] 129 markets in 3.4s | yes:47 no:19 | next in 30s
+2026-07-27 07:35:08,164 - INFO - [SCREENER] 127 markets in 3.1s | yes:44 no:16 | next in 30s
+2026-07-27 07:35:44,677 - INFO - [SCREENER] 129 markets in 3.0s | yes:41 no:15 | next in 30s
+2026-07-27 07:36:19,956 - INFO - [SCREENER] 131 markets in 3.7s | yes:39 no:16 | next in 30s
+2026-07-27 07:36:28,473 - INFO - [BUY CONFIRMED] 未知 | No | size=15.0000 price=0.64
+2026-07-27 07:36:56,205 - INFO - [SCREENER] 126 markets in 4.8s | yes:43 no:15 | next in 30s
+2026-07-27 07:37:33,450 - INFO - [SCREENER] 129 markets in 5.1s | yes:41 no:14 | next in 30s
+2026-07-27 07:37:34,013 - ERROR - [py_clob_client_v2] request error: <ConnectionTerminated error_code:1, last_stream_id:17, additional_data:None>
+2026-07-27 07:37:34,014 - ERROR - [CANCEL FAIL] 0xfd800065e827c9c14b... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:37:34,016 - ERROR - [py_clob_client_v2] request error: <ConnectionTerminated error_code:1, last_stream_id:17, additional_data:None>
+2026-07-27 07:37:34,018 - ERROR - [py_clob_client_v2] request error: <ConnectionTerminated error_code:1, last_stream_id:17, additional_data:None>
+2026-07-27 07:37:34,019 - ERROR - [CANCEL FAIL] 0xc7a59a852d71909a88... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:37:34,021 - ERROR - [py_clob_client_v2] request error: <ConnectionTerminated error_code:1, last_stream_id:17, additional_data:None>
+2026-07-27 07:37:34,022 - ERROR - 查询订单失败: PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 07:37:34,022 - WARNING - [AUDIT] 2516053342065208 订单丢失纠偏
+2026-07-27 07:37:34,022 - WARNING - [AUDIT] 1915443050348993 订单丢失纠偏
+2026-07-27 07:37:34,022 - WARNING - [AUDIT] 7028975518222497 订单丢失纠偏
+2026-07-27 07:37:34,022 - WARNING - [AUDIT] 8144221557173654 订单丢失纠偏
+2026-07-27 07:37:34,022 - WARNING - [AUDIT] 1533506491177191 订单丢失纠偏
+2026-07-27 07:37:34,022 - WARNING - [AUDIT] 9812374390908265 订单丢失纠偏
+2026-07-27 07:37:34,023 - WARNING - [AUDIT] 1105534731429668 订单丢失纠偏
+2026-07-27 07:37:34,023 - WARNING - [AUDIT] 7496475087535168 订单丢失纠偏
+2026-07-27 07:37:34,023 - WARNING - [AUDIT] 1055875303810931 订单丢失纠偏
+2026-07-27 07:37:34,023 - WARNING - [AUDIT] 4008225144310427 订单丢失纠偏
+2026-07-27 07:37:34,023 - WARNING - [AUDIT] 4299099818861514 订单丢失纠偏
+2026-07-27 07:37:34,023 - WARNING - [AUDIT] 2059413484870737 订单丢失纠偏
+2026-07-27 07:37:34,023 - WARNING - [AUDIT] 1073152975037832 订单丢失纠偏
+2026-07-27 07:37:34,023 - WARNING - [AUDIT] 6840743584459619 订单丢失纠偏
+2026-07-27 07:37:34,023 - WARNING - [AUDIT] 1024551408877687 订单丢失纠偏
+2026-07-27 07:37:34,023 - WARNING - [AUDIT] 1694972000365205 订单丢失纠偏
+2026-07-27 07:37:34,023 - WARNING - [AUDIT] 6458838805006032 订单丢失纠偏
+2026-07-27 07:37:34,024 - WARNING - [AUDIT] 1068168590999466 订单丢失纠偏
+2026-07-27 07:37:34,024 - WARNING - [AUDIT] 4529678639700238 订单丢失纠偏
+2026-07-27 07:37:34,024 - WARNING - [AUDIT] 1306711952153612 订单丢失纠偏
+2026-07-27 07:37:34,024 - WARNING - [AUDIT] 4115700831945714 订单丢失纠偏
+2026-07-27 07:37:34,024 - WARNING - [AUDIT] 8837123662738760 订单丢失纠偏
+2026-07-27 07:37:34,025 - WARNING - [AUDIT] 6718004052598008 订单丢失纠偏
+2026-07-27 07:37:34,025 - WARNING - [AUDIT] 4056485298084808 订单丢失纠偏
+2026-07-27 07:37:34,025 - WARNING - [AUDIT] 1062032991491342 订单丢失纠偏
+2026-07-27 07:37:34,025 - WARNING - [AUDIT] 1133572939724817 订单丢失纠偏
+2026-07-27 07:37:34,025 - WARNING - [AUDIT] 7294321652115198 订单丢失纠偏
+2026-07-27 07:37:34,025 - WARNING - [AUDIT] 1231214294561282 订单丢失纠偏
+2026-07-27 07:37:34,025 - WARNING - [AUDIT] 5061466891472454 订单丢失纠偏
+2026-07-27 07:37:34,025 - WARNING - [AUDIT] 2153524962099834 订单丢失纠偏
+2026-07-27 07:37:34,026 - WARNING - [AUDIT] 2726733347616966 订单丢失纠偏
+2026-07-27 07:37:34,026 - WARNING - [AUDIT] 1708432164233727 订单丢失纠偏
+2026-07-27 07:37:34,026 - WARNING - [AUDIT] 8957173687303088 订单丢失纠偏
+2026-07-27 07:37:34,026 - WARNING - [AUDIT] 5344615256846943 订单丢失纠偏
+2026-07-27 07:37:34,026 - WARNING - [AUDIT] 7101294439518353 订单丢失纠偏
+2026-07-27 07:37:34,026 - WARNING - [AUDIT] 7914256100489361 订单丢失纠偏
+2026-07-27 07:37:34,027 - WARNING - [AUDIT] 9720420655027725 订单丢失纠偏
+2026-07-27 07:37:34,027 - WARNING - [AUDIT] 6693362690307318 订单丢失纠偏
+2026-07-27 07:37:34,027 - WARNING - [AUDIT] 1859190173715168 订单丢失纠偏
+2026-07-27 07:37:34,027 - WARNING - [AUDIT] 4090710294059431 订单丢失纠偏
+2026-07-27 07:37:34,027 - WARNING - [AUDIT] 6398223302828035 订单丢失纠偏
+2026-07-27 07:37:34,027 - WARNING - [AUDIT] 7159316159202977 订单丢失纠偏
+2026-07-27 07:37:34,027 - WARNING - [AUDIT] 4209462673546745 订单丢失纠偏
+2026-07-27 07:37:34,027 - WARNING - [AUDIT] 2741391604444855 订单丢失纠偏
+2026-07-27 07:37:34,027 - WARNING - [AUDIT] 9660565024693657 订单丢失纠偏
+2026-07-27 07:37:34,027 - WARNING - [AUDIT] 8359989294445929 订单丢失纠偏
+2026-07-27 07:37:34,027 - WARNING - [AUDIT] 1001616784634634 订单丢失纠偏
+2026-07-27 07:37:34,027 - WARNING - [AUDIT] 9883787412035160 订单丢失纠偏
+2026-07-27 07:37:34,028 - WARNING - [AUDIT] 3081912143587805 订单丢失纠偏
+2026-07-27 07:37:34,028 - WARNING - [AUDIT] 4509462261879313 订单丢失纠偏
+2026-07-27 07:37:34,028 - WARNING - [AUDIT] 9168369715611961 订单丢失纠偏
+2026-07-27 07:37:34,028 - WARNING - [AUDIT] 8596344676544625 订单丢失纠偏
+2026-07-27 07:37:34,028 - WARNING - [AUDIT] 5473705433421184 订单丢失纠偏
+2026-07-27 07:37:34,028 - WARNING - [AUDIT] 1394146897913131 订单丢失纠偏
+2026-07-27 07:37:34,028 - WARNING - [AUDIT] 8294972998917617 订单丢失纠偏
+2026-07-27 07:37:34,028 - WARNING - [AUDIT] 3023609921040208 订单丢失纠偏
+2026-07-27 07:37:34,028 - WARNING - [AUDIT] 1067889739151093 订单丢失纠偏
+2026-07-27 07:37:34,028 - WARNING - [AUDIT] 8342774982335276 订单丢失纠偏
+2026-07-27 07:37:34,028 - WARNING - [AUDIT] 2314085681503223 订单丢失纠偏
+2026-07-27 07:37:34,029 - WARNING - [AUDIT] 9019759043072915 订单丢失纠偏
+2026-07-27 07:37:34,029 - WARNING - [AUDIT] 7722815841966251 订单丢失纠偏
+2026-07-27 07:37:34,029 - WARNING - [AUDIT] 8040868570402702 订单丢失纠偏
+2026-07-27 07:37:34,321 - ERROR - [HEARTBEAT] 失败 (连续 1 次): 401 Client Error: Unauthorized for url: https://clob.polymarket.com/v1/heartbeats
+2026-07-27 07:37:35,533 - ERROR - [py_clob_client_v2] request error status=400 url=https://clob.polymarket.com/v1/heartbeats body={"heartbeat_id":"19196f06-7a48-4cf1-b102-71124fa9e6b8","error_msg":"Invalid Heartbeat ID"}
+2026-07-27 07:37:35,533 - INFO - [HEARTBEAT] 从 SDK 错误恢复 heartbeat_id: 19196f06-7a48-4c (旧: 9604a797-1d7a-46)
+2026-07-27 07:37:35,729 - INFO - [LIMIT SELL] Will the highest temperature in Munich b | 15.0011 shares @ 0.36
+2026-07-27 07:37:35,730 - INFO - [HEARTBEAT] OK (recovered) id=0b791e52-2403-49
+2026-07-27 07:37:35,730 - INFO - [POSITION] 限价卖出 1 个持仓
+2026-07-27 07:37:35,737 - ERROR - [CANCEL FAIL] 0xfd800065e827c9c14b 订单仍存活在交易所！保持 RESTING
+2026-07-27 07:37:35,739 - ERROR - [CANCEL FAIL] 0xc7a59a852d71909a88 订单仍存活在交易所！保持 RESTING
+2026-07-27 07:37:45,721 - INFO - [SELL CONFIRMED] 未知 | Yes | size=0.0000 price=0.36
+2026-07-27 07:38:09,907 - INFO - [SCREENER] 129 markets in 3.3s | yes:39 no:18 | next in 30s
+2026-07-27 07:38:45,989 - INFO - [SCREENER] 129 markets in 4.4s | yes:41 no:16 | next in 30s
+2026-07-27 07:39:21,656 - INFO - [SCREENER] 129 markets in 4.1s | yes:42 no:16 | next in 30s
+2026-07-27 07:39:33,455 - WARNING - [AUDIT] 1055036942479153 订单丢失纠偏
+2026-07-27 07:39:58,281 - INFO - [SCREENER] 130 markets in 3.2s | yes:42 no:18 | next in 30s
+2026-07-27 07:40:33,411 - INFO - [SCREENER] 130 markets in 3.7s | yes:42 no:16 | next in 30s
+2026-07-27 07:41:08,323 - INFO - [SCREENER] 130 markets in 3.2s | yes:43 no:17 | next in 30s
+2026-07-27 07:41:43,232 - INFO - [SCREENER] 128 markets in 3.4s | yes:42 no:20 | next in 30s
+2026-07-27 07:42:20,105 - INFO - [SCREENER] 132 markets in 3.4s | yes:41 no:19 | next in 30s
+2026-07-27 07:42:54,852 - INFO - [SCREENER] 134 markets in 3.4s | yes:40 no:22 | next in 30s
+2026-07-27 07:43:30,426 - INFO - [SCREENER] 131 markets in 3.7s | yes:43 no:20 | next in 30s
+2026-07-27 07:44:06,260 - INFO - [SCREENER] 130 markets in 2.9s | yes:43 no:22 | next in 30s
+2026-07-27 07:44:41,193 - INFO - [SCREENER] 130 markets in 3.3s | yes:45 no:25 | next in 30s
+2026-07-27 07:45:15,779 - INFO - [SCREENER] 130 markets in 2.9s | yes:42 no:23 | next in 30s
+2026-07-27 07:45:50,922 - INFO - [SCREENER] 131 markets in 3.9s | yes:39 no:25 | next in 30s
+2026-07-27 07:46:27,472 - INFO - [SCREENER] 131 markets in 3.1s | yes:41 no:24 | next in 30s
+2026-07-27 07:47:02,563 - INFO - [SCREENER] 132 markets in 3.5s | yes:40 no:24 | next in 30s
+2026-07-27 07:47:39,478 - INFO - [SCREENER] 129 markets in 5.5s | yes:45 no:21 | next in 30s
+2026-07-27 07:48:15,984 - INFO - [SCREENER] 128 markets in 3.4s | yes:44 no:21 | next in 30s
+2026-07-27 07:48:51,852 - INFO - [SCREENER] 130 markets in 4.2s | yes:46 no:19 | next in 30s
+2026-07-27 07:49:03,797 - ERROR - [BATCH CANCEL FAIL] 0x646005281883273cc5... | the order is already canceled
+2026-07-27 07:49:04,567 - ERROR - [BATCH CANCEL] 9613047901200733 取消失败，清空 active_id 进入冷却兜底
+2026-07-27 07:49:27,690 - INFO - [SCREENER] 130 markets in 3.7s | yes:43 no:17 | next in 30s
+2026-07-27 07:49:39,039 - ERROR - [BATCH CANCEL FAIL] 0x1fde017371a7fc6ace... | the order is already canceled
+2026-07-27 07:49:39,821 - ERROR - [BATCH CANCEL] 9720420655027725 取消失败，清空 active_id 进入冷却兜底
+2026-07-27 07:49:43,728 - INFO - 收到停止信号，优雅退出...
+2026-07-27 07:49:43,823 - INFO - 开始优雅关闭...
+2026-07-27 07:49:44,048 - INFO - [CANCEL ALL] 5 已取消 | 系统关闭
+2026-07-27 07:49:44,833 - INFO - [HEARTBEAT] 已停止
+2026-07-27 07:49:44,833 - INFO - ============================================================
+系统已停止
+============================================================
+2026-07-27 08:25:08,507 - INFO - ============================================================
+2026-07-27 08:25:08,508 - INFO - Maker-only Guardian V7.0 启动
+2026-07-27 08:25:08,508 - INFO - 地址: 0x304bf40e9e50c265f6dd86417707d5b41d8ea619 | 档: 2 | 量: 50 | 冷却: 120s | 心跳: 7.0s
+2026-07-27 08:25:08,508 - INFO - ============================================================
+2026-07-27 08:25:08,514 - INFO - [HEARTBEAT] 已启动 interval=7.0s
+2026-07-27 08:25:42,301 - INFO - [SCREENER] 134 markets in 3.5s | yes:46 no:15 | next in 30s
+2026-07-27 08:25:50,307 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:25:50,308 - ERROR - [PLACE FAIL] 5690230991047232... price=0.27 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:25:50,308 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:25:50,308 - ERROR - [PLACE FAIL] 8596344676544625... price=0.65 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:25:50,310 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:25:50,310 - ERROR - [PLACE FAIL] 1306711952153612... price=0.31 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:25:51,745 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:25:51,745 - ERROR - [PLACE FAIL] 5690230991047232... price=0.27 attempt=2/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:25:51,747 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:25:51,747 - ERROR - [PLACE FAIL] 1068168590999466... price=0.62 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:25:51,757 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:25:51,765 - ERROR - [PLACE FAIL] 8596344676544625... price=0.65 attempt=2/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:25:52,070 - INFO - [PLACE RECOVERY] 5690230991047232... price=0.27 响应丢失但订单已挂 id=0x1a8479aae84ec908f4
+2026-07-27 08:25:53,168 - ERROR - [PLACE FAIL] 8596344676544625 price=0.65
+2026-07-27 08:25:55,390 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:25:55,391 - ERROR - [PLACE FAIL] 2647317306157836... price=0.26 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:25:55,392 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:25:55,393 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:25:55,393 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:25:55,395 - ERROR - [PLACE FAIL] 1087938519526152... price=0.27 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:25:55,395 - ERROR - 获取订单簿失败: 96605650246936579701... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:25:55,393 - ERROR - 获取订单簿失败: 99414330674225122069... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:25:56,172 - WARNING - [RETRY] 9660565024693657 bids不足2档，10s后重试
+2026-07-27 08:25:56,178 - WARNING - [RETRY] 9941433067422512 bids不足2档，10s后重试
+2026-07-27 08:25:56,404 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:25:56,404 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:25:56,405 - ERROR - [PLACE FAIL] 5344615256846943... price=0.29 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:25:56,405 - ERROR - [PLACE FAIL] 3543561891537680... price=0.34 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:26:00,617 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:26:00,618 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:26:00,619 - ERROR - [PLACE FAIL] 4008225144310427... price=0.35 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:26:00,635 - ERROR - [PLACE FAIL] 2726733347616966... price=0.34 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:26:09,734 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:26:09,735 - ERROR - [PLACE FAIL] 8662470475793483... price=0.57 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:26:09,740 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:26:09,741 - ERROR - [PLACE FAIL] 2526251226393319... price=0.56 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:26:10,330 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:26:10,332 - ERROR - [PLACE FAIL] 7294321652115198... price=0.32 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:26:10,331 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:26:10,338 - ERROR - [PLACE FAIL] 6160322726992591... price=0.71 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:26:13,651 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:26:13,652 - ERROR - [PLACE FAIL] 6458838805006032... price=0.35 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:26:13,653 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:26:13,656 - ERROR - [PLACE FAIL] 3813359922360858... price=0.68 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:26:16,865 - INFO - [SCREENER] 133 markets in 3.3s | yes:48 no:16 | next in 30s
+2026-07-27 08:26:51,931 - INFO - [SCREENER] 133 markets in 3.7s | yes:47 no:18 | next in 30s
+2026-07-27 08:27:14,911 - WARNING - [POSITION] 1693914688272143 best_bid=0.72 < 成本0.7600-0.02=0.7400，取消卖单等待
+2026-07-27 08:27:14,912 - WARNING - [POSITION] 7080098845598948 best_bid=0.25 < 成本0.3500-0.02=0.3300，取消卖单等待
+2026-07-27 08:27:14,912 - WARNING - [POSITION] 5384337104970951 best_bid=0.24 < 成本0.3300-0.02=0.3100，取消卖单等待
+2026-07-27 08:27:28,255 - INFO - [SCREENER] 134 markets in 3.3s | yes:41 no:16 | next in 30s
+2026-07-27 08:28:03,629 - INFO - [SCREENER] 133 markets in 3.8s | yes:40 no:17 | next in 30s
+2026-07-27 08:28:38,832 - INFO - [SCREENER] 134 markets in 4.0s | yes:41 no:16 | next in 30s
+2026-07-27 08:29:13,945 - INFO - [SCREENER] 134 markets in 3.7s | yes:41 no:14 | next in 30s
+2026-07-27 08:29:50,651 - INFO - [SCREENER] 133 markets in 3.3s | yes:40 no:14 | next in 30s
+2026-07-27 08:30:25,516 - INFO - [SCREENER] 134 markets in 3.4s | yes:42 no:16 | next in 30s
+2026-07-27 08:31:00,303 - INFO - [SCREENER] 132 markets in 3.6s | yes:43 no:17 | next in 30s
+2026-07-27 08:31:35,131 - INFO - [SCREENER] 130 markets in 3.2s | yes:41 no:19 | next in 30s
+2026-07-27 08:32:11,379 - INFO - [SCREENER] 131 markets in 3.5s | yes:42 no:20 | next in 30s
+2026-07-27 08:32:46,380 - INFO - [SCREENER] 134 markets in 3.8s | yes:42 no:17 | next in 30s
+2026-07-27 08:33:21,128 - INFO - [SCREENER] 135 markets in 3.3s | yes:43 no:21 | next in 30s
+2026-07-27 08:33:57,461 - INFO - [SCREENER] 134 markets in 3.3s | yes:37 no:21 | next in 30s
+2026-07-27 08:34:32,300 - INFO - [SCREENER] 132 markets in 3.2s | yes:39 no:20 | next in 30s
+2026-07-27 08:35:07,535 - INFO - [SCREENER] 133 markets in 3.5s | yes:38 no:21 | next in 30s
+2026-07-27 08:35:42,272 - INFO - [SCREENER] 133 markets in 3.3s | yes:40 no:22 | next in 30s
+2026-07-27 08:36:19,036 - INFO - [SCREENER] 136 markets in 3.6s | yes:42 no:23 | next in 30s
+2026-07-27 08:36:53,888 - INFO - [SCREENER] 133 markets in 3.4s | yes:43 no:23 | next in 30s
+2026-07-27 08:37:28,955 - INFO - [SCREENER] 135 markets in 3.7s | yes:45 no:24 | next in 30s
+2026-07-27 08:38:05,392 - INFO - [SCREENER] 133 markets in 3.2s | yes:48 no:21 | next in 30s
+2026-07-27 08:38:40,953 - INFO - [SCREENER] 133 markets in 3.8s | yes:49 no:22 | next in 30s
+2026-07-27 08:39:17,200 - INFO - [SCREENER] 133 markets in 4.7s | yes:48 no:23 | next in 30s
+2026-07-27 08:39:51,480 - INFO - [SCREENER] 136 markets in 3.1s | yes:46 no:24 | next in 30s
+2026-07-27 08:39:53,711 - INFO - [LIMIT SELL] Will the highest temperature in Houston  | 35.6044 shares @ 0.38
+2026-07-27 08:39:53,712 - INFO - [POSITION] 限价卖出 1 个持仓
+2026-07-27 08:39:54,055 - INFO - [BUY CONFIRMED] 未知 | No | size=5.6044 price=0.61
+2026-07-27 08:39:54,948 - INFO - [BUY CONFIRMED] 未知 | No | size=20.0000 price=0.61
+2026-07-27 08:39:59,647 - INFO - [BUY CONFIRMED] 未知 | No | size=10.0000 price=0.61
+2026-07-27 08:40:01,874 - INFO - [SELL CONFIRMED] 未知 | Yes | size=0.0000 price=0.38
+2026-07-27 08:40:28,593 - INFO - [SCREENER] 135 markets in 4.2s | yes:43 no:22 | next in 30s
+2026-07-27 08:41:04,410 - INFO - [SCREENER] 132 markets in 4.4s | yes:40 no:20 | next in 30s
+2026-07-27 08:41:39,728 - INFO - [SCREENER] 132 markets in 3.7s | yes:41 no:21 | next in 30s
+2026-07-27 08:42:16,361 - INFO - [SCREENER] 132 markets in 3.6s | yes:41 no:24 | next in 30s
+2026-07-27 08:42:51,653 - INFO - [SCREENER] 131 markets in 3.5s | yes:41 no:24 | next in 30s
+2026-07-27 08:43:27,085 - INFO - [SCREENER] 133 markets in 4.0s | yes:42 no:24 | next in 30s
+2026-07-27 08:43:39,835 - ERROR - [py_clob_client_v2] request error: The read operation timed out
+2026-07-27 08:43:39,836 - ERROR - [PLACE FAIL] 8625935570820501... price=0.32 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:43:45,845 - ERROR - [py_clob_client_v2] request error: The read operation timed out
+2026-07-27 08:43:45,847 - ERROR - [PLACE FAIL] 8625935570820501... price=0.32 attempt=2/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:43:46,155 - ERROR - [PLACE FAIL] 8625935570820501 price=0.32
+2026-07-27 08:44:01,533 - ERROR - [py_clob_client_v2] request error: The read operation timed out
+2026-07-27 08:44:01,534 - ERROR - [PLACE FAIL] 4963761908714249... price=0.63 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:44:02,374 - INFO - [SCREENER] 133 markets in 3.8s | yes:41 no:24 | next in 30s
+2026-07-27 08:44:07,599 - ERROR - [py_clob_client_v2] request error: The read operation timed out
+2026-07-27 08:44:07,600 - ERROR - [PLACE FAIL] 4963761908714249... price=0.63 attempt=2/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:44:09,406 - ERROR - [PLACE FAIL] 4963761908714249 price=0.63
+2026-07-27 08:44:51,211 - INFO - [SCREENER] 131 markets in 21.5s | yes:47 no:22 | next in 30s
+2026-07-27 08:45:05,452 - INFO - [SCREENER] 131 markets in 3.7s | yes:46 no:19 | next in 30s
+2026-07-27 08:45:40,376 - INFO - [SCREENER] 131 markets in 3.6s | yes:47 no:21 | next in 30s
+2026-07-27 08:46:16,708 - INFO - [SCREENER] 132 markets in 3.5s | yes:48 no:19 | next in 30s
+2026-07-27 08:46:52,084 - INFO - [SCREENER] 134 markets in 4.0s | yes:47 no:19 | next in 30s
+2026-07-27 08:47:28,694 - INFO - [SCREENER] 133 markets in 5.5s | yes:45 no:18 | next in 30s
+2026-07-27 08:48:03,329 - INFO - [SCREENER] 135 markets in 3.0s | yes:46 no:22 | next in 30s
+2026-07-27 08:48:38,962 - INFO - [SCREENER] 134 markets in 3.0s | yes:47 no:19 | next in 30s
+2026-07-27 08:49:14,100 - INFO - [SCREENER] 135 markets in 3.5s | yes:46 no:22 | next in 30s
+2026-07-27 08:49:49,130 - INFO - [SCREENER] 136 markets in 3.6s | yes:47 no:21 | next in 30s
+2026-07-27 08:50:25,449 - INFO - [SCREENER] 135 markets in 5.1s | yes:47 no:23 | next in 30s
+2026-07-27 08:51:01,721 - INFO - [SCREENER] 137 markets in 3.3s | yes:46 no:21 | next in 30s
+2026-07-27 08:51:36,472 - INFO - [SCREENER] 137 markets in 3.3s | yes:46 no:17 | next in 30s
+2026-07-27 08:52:11,498 - INFO - [SCREENER] 138 markets in 3.4s | yes:48 no:19 | next in 30s
+2026-07-27 08:52:48,996 - INFO - [SCREENER] 140 markets in 4.6s | yes:50 no:22 | next in 30s
+2026-07-27 08:53:24,004 - INFO - [SCREENER] 140 markets in 3.7s | yes:49 no:19 | next in 30s
+2026-07-27 08:54:01,535 - INFO - [SCREENER] 139 markets in 5.8s | yes:45 no:21 | next in 30s
+2026-07-27 08:54:06,299 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:54:06,300 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:54:06,300 - ERROR - 获取订单簿失败: 83805804744909584132... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:54:06,301 - ERROR - 获取订单簿失败: 10016167846346347555... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:54:07,294 - WARNING - [RETRY] 8380580474490958 bids不足2档，10s后重试
+2026-07-27 08:54:07,294 - WARNING - [RETRY] 1001616784634634 bids不足2档，10s后重试
+2026-07-27 08:54:22,948 - ERROR - [py_clob_client_v2] request error: <ConnectionTerminated error_code:1, last_stream_id:19, additional_data:None>
+2026-07-27 08:54:22,949 - ERROR - [py_clob_client_v2] request error: <ConnectionTerminated error_code:1, last_stream_id:19, additional_data:None>
+2026-07-27 08:54:22,949 - ERROR - 查询订单失败: PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:54:22,949 - ERROR - [BATCH CANCEL ERR] 1 条 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:54:22,950 - WARNING - [AUDIT] 8161173925686401 订单丢失纠偏
+2026-07-27 08:54:22,950 - WARNING - [AUDIT] 2628426403432788 订单丢失纠偏
+2026-07-27 08:54:22,950 - WARNING - [AUDIT] 1306711952153612 订单丢失纠偏
+2026-07-27 08:54:22,950 - WARNING - [AUDIT] 8837123662738760 订单丢失纠偏
+2026-07-27 08:54:22,950 - WARNING - [AUDIT] 5061466891472454 订单丢失纠偏
+2026-07-27 08:54:22,951 - WARNING - [AUDIT] 9268736251335863 订单丢失纠偏
+2026-07-27 08:54:22,951 - WARNING - [AUDIT] 7294321652115198 订单丢失纠偏
+2026-07-27 08:54:22,951 - WARNING - [AUDIT] 8596344676544625 订单丢失纠偏
+2026-07-27 08:54:22,951 - WARNING - [AUDIT] 3813359922360858 订单丢失纠偏
+2026-07-27 08:54:22,951 - WARNING - [AUDIT] 1073152975037832 订单丢失纠偏
+2026-07-27 08:54:22,951 - WARNING - [AUDIT] 1024551408877687 订单丢失纠偏
+2026-07-27 08:54:22,951 - WARNING - [AUDIT] 9168369715611961 订单丢失纠偏
+2026-07-27 08:54:22,951 - WARNING - [AUDIT] 7722815841966251 订单丢失纠偏
+2026-07-27 08:54:22,952 - WARNING - [AUDIT] 3077152362218609 订单丢失纠偏
+2026-07-27 08:54:22,952 - WARNING - [AUDIT] 2726733347616966 订单丢失纠偏
+2026-07-27 08:54:22,952 - WARNING - [AUDIT] 6458838805006032 订单丢失纠偏
+2026-07-27 08:54:22,952 - WARNING - [AUDIT] 1068168590999466 订单丢失纠偏
+2026-07-27 08:54:22,952 - WARNING - [AUDIT] 4008225144310427 订单丢失纠偏
+2026-07-27 08:54:22,952 - WARNING - [AUDIT] 4056485298084808 订单丢失纠偏
+2026-07-27 08:54:22,952 - WARNING - [AUDIT] 3623460931603668 订单丢失纠偏
+2026-07-27 08:54:22,952 - WARNING - [AUDIT] 1007257428517780 订单丢失纠偏
+2026-07-27 08:54:22,952 - WARNING - [AUDIT] 5844061305126499 订单丢失纠偏
+2026-07-27 08:54:22,952 - WARNING - [AUDIT] 1126105863031871 订单丢失纠偏
+2026-07-27 08:54:22,952 - WARNING - [AUDIT] 9384866745041138 订单丢失纠偏
+2026-07-27 08:54:22,952 - WARNING - [AUDIT] 3247568238040037 订单丢失纠偏
+2026-07-27 08:54:22,953 - WARNING - [AUDIT] 1062032991491342 订单丢失纠偏
+2026-07-27 08:54:22,953 - WARNING - [AUDIT] 8355831989224652 订单丢失纠偏
+2026-07-27 08:54:22,953 - WARNING - [AUDIT] 3216190177065906 订单丢失纠偏
+2026-07-27 08:54:22,953 - WARNING - [AUDIT] 9883787412035160 订单丢失纠偏
+2026-07-27 08:54:22,953 - WARNING - [AUDIT] 2741391604444855 订单丢失纠偏
+2026-07-27 08:54:22,953 - WARNING - [AUDIT] 9363467746213382 订单丢失纠偏
+2026-07-27 08:54:22,953 - WARNING - [AUDIT] 5528339516718035 订单丢失纠偏
+2026-07-27 08:54:22,953 - WARNING - [AUDIT] 9660565024693657 订单丢失纠偏
+2026-07-27 08:54:22,953 - WARNING - [AUDIT] 1144609358581202 订单丢失纠偏
+2026-07-27 08:54:22,953 - WARNING - [AUDIT] 4299099818861514 订单丢失纠偏
+2026-07-27 08:54:22,953 - WARNING - [AUDIT] 1859190173715168 订单丢失纠偏
+2026-07-27 08:54:22,954 - WARNING - [AUDIT] 1133972517344495 订单丢失纠偏
+2026-07-27 08:54:22,954 - WARNING - [AUDIT] 2153524962099834 订单丢失纠偏
+2026-07-27 08:54:22,954 - WARNING - [AUDIT] 1105534731429668 订单丢失纠偏
+2026-07-27 08:54:22,954 - WARNING - [AUDIT] 3233810037213677 订单丢失纠偏
+2026-07-27 08:54:22,954 - WARNING - [AUDIT] 1694972000365205 订单丢失纠偏
+2026-07-27 08:54:22,954 - WARNING - [AUDIT] 7028975518222497 订单丢失纠偏
+2026-07-27 08:54:22,954 - WARNING - [AUDIT] 5891447129752063 订单丢失纠偏
+2026-07-27 08:54:22,954 - WARNING - [AUDIT] 3874138864648061 订单丢失纠偏
+2026-07-27 08:54:22,954 - WARNING - [AUDIT] 9941433067422512 订单丢失纠偏
+2026-07-27 08:54:22,954 - WARNING - [AUDIT] 5511817259606480 订单丢失纠偏
+2026-07-27 08:54:22,954 - WARNING - [AUDIT] 4115700831945714 订单丢失纠偏
+2026-07-27 08:54:22,955 - WARNING - [AUDIT] 1394146897913131 订单丢失纠偏
+2026-07-27 08:54:22,955 - WARNING - [AUDIT] 9231175867772838 订单丢失纠偏
+2026-07-27 08:54:22,955 - WARNING - [AUDIT] 1067889739151093 订单丢失纠偏
+2026-07-27 08:54:22,955 - WARNING - [AUDIT] 1374295507196368 订单丢失纠偏
+2026-07-27 08:54:22,955 - WARNING - [AUDIT] 9968205677236143 订单丢失纠偏
+2026-07-27 08:54:22,955 - WARNING - [AUDIT] 5521095702865923 订单丢失纠偏
+2026-07-27 08:54:22,955 - WARNING - [AUDIT] 9246919199388356 订单丢失纠偏
+2026-07-27 08:54:22,955 - WARNING - [AUDIT] 5113116197786627 订单丢失纠偏
+2026-07-27 08:54:22,955 - WARNING - [AUDIT] 7080098845598948 订单丢失纠偏
+2026-07-27 08:54:22,955 - WARNING - [AUDIT] 8294972998917617 订单丢失纠偏
+2026-07-27 08:54:22,956 - WARNING - [AUDIT] 7914256100489361 订单丢失纠偏
+2026-07-27 08:54:22,956 - WARNING - [AUDIT] 4209462673546745 订单丢失纠偏
+2026-07-27 08:54:22,956 - WARNING - [AUDIT] 6693362690307318 订单丢失纠偏
+2026-07-27 08:54:22,956 - WARNING - [AUDIT] 8482260678952243 订单丢失纠偏
+2026-07-27 08:54:22,956 - WARNING - [AUDIT] 8380580474490958 订单丢失纠偏
+2026-07-27 08:54:22,956 - WARNING - [AUDIT] 1001616784634634 订单丢失纠偏
+2026-07-27 08:54:23,942 - ERROR - [BATCH CANCEL] 1800081602248726 取消失败，清空 active_id 进入冷却兜底
+2026-07-27 08:54:37,998 - INFO - [SCREENER] 138 markets in 4.1s | yes:45 no:19 | next in 30s
+2026-07-27 08:55:12,468 - INFO - [SCREENER] 139 markets in 2.9s | yes:42 no:21 | next in 30s
+2026-07-27 08:55:47,988 - INFO - [SCREENER] 142 markets in 4.1s | yes:43 no:26 | next in 30s
+2026-07-27 08:56:22,233 - INFO - [SCREENER] 144 markets in 2.8s | yes:42 no:26 | next in 30s
+2026-07-27 08:56:23,791 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,792 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,792 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,792 - ERROR - 获取订单簿失败: 93634677462133826795... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,793 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,793 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,794 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,801 - ERROR - 获取订单簿失败: 32161901770659064961... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,794 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,798 - ERROR - 获取订单簿失败: 11446093585812026721... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,794 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,801 - ERROR - 获取订单簿失败: 96605650246936579701... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,805 - ERROR - 获取订单簿失败: 98837874120351600528... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,799 - ERROR - 获取订单簿失败: 83558319892246525826... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,802 - ERROR - 获取订单簿失败: 18591901737151680008... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,801 - ERROR - 获取订单簿失败: 42990998188615141821... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,820 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,821 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,821 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,821 - ERROR - 获取订单簿失败: 32338100372136774449... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,822 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,829 - ERROR - 获取订单簿失败: 70289755182224971387... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,825 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,826 - ERROR - 获取订单簿失败: 21535249620998346050... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,826 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,826 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,826 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,832 - ERROR - 获取订单簿失败: 55118172596064806444... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,827 - ERROR - 获取订单簿失败: 11055347314296681357... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,822 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,830 - ERROR - 获取订单簿失败: 38741388646480619751... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,832 - ERROR - 获取订单簿失败: 99414330674225122069... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,827 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:23,838 - ERROR - 获取订单簿失败: 41157008319457144531... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,836 - ERROR - 获取订单簿失败: 58914471297520639781... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:23,833 - ERROR - 获取订单簿失败: 11339725173444955574... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:24,155 - WARNING - [RETRY] 8355831989224652 bids不足2档，10s后重试
+2026-07-27 08:56:24,156 - WARNING - [RETRY] 3216190177065906 bids不足2档，10s后重试
+2026-07-27 08:56:24,158 - WARNING - [RETRY] 9883787412035160 bids不足2档，10s后重试
+2026-07-27 08:56:24,174 - WARNING - [RETRY] 9363467746213382 bids不足2档，10s后重试
+2026-07-27 08:56:24,178 - WARNING - [RETRY] 9660565024693657 bids不足2档，10s后重试
+2026-07-27 08:56:24,179 - WARNING - [RETRY] 1144609358581202 bids不足2档，10s后重试
+2026-07-27 08:56:24,179 - WARNING - [RETRY] 4299099818861514 bids不足2档，10s后重试
+2026-07-27 08:56:24,179 - WARNING - [RETRY] 1859190173715168 bids不足2档，10s后重试
+2026-07-27 08:56:24,179 - WARNING - [RETRY] 1133972517344495 bids不足2档，10s后重试
+2026-07-27 08:56:24,179 - WARNING - [RETRY] 2153524962099834 bids不足2档，10s后重试
+2026-07-27 08:56:24,179 - WARNING - [RETRY] 1105534731429668 bids不足2档，10s后重试
+2026-07-27 08:56:24,179 - WARNING - [RETRY] 3233810037213677 bids不足2档，10s后重试
+2026-07-27 08:56:24,180 - WARNING - [RETRY] 7028975518222497 bids不足2档，10s后重试
+2026-07-27 08:56:24,180 - WARNING - [RETRY] 5891447129752063 bids不足2档，10s后重试
+2026-07-27 08:56:24,180 - WARNING - [RETRY] 3874138864648061 bids不足2档，10s后重试
+2026-07-27 08:56:24,180 - WARNING - [RETRY] 9941433067422512 bids不足2档，10s后重试
+2026-07-27 08:56:24,180 - WARNING - [RETRY] 5511817259606480 bids不足2档，10s后重试
+2026-07-27 08:56:24,180 - WARNING - [RETRY] 4115700831945714 bids不足2档，10s后重试
+2026-07-27 08:56:28,796 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:28,798 - ERROR - [PLACE FAIL] 3247568238040037... price=0.51 attempt=1/2 | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:28,798 - ERROR - [py_clob_client_v2] request error: Server disconnected
+2026-07-27 08:56:28,798 - ERROR - 获取订单簿失败: 21937686290099023668... | PolyApiException[status_code=None, error_message=Request exception!]
+2026-07-27 08:56:29,185 - WARNING - [RETRY] 2193768629009902 bids不足2档，10s后重试
+2026-07-27 08:56:33,704 - INFO - [BUY CONFIRMED] 未知 | No | size=21.3600 price=0.67
+2026-07-27 08:56:35,223 - INFO - [LIMIT SELL] Will the highest temperature in Munich b | 21.3600 shares @ 0.33
+2026-07-27 08:56:35,223 - INFO - [POSITION] 限价卖出 1 个持仓
+2026-07-27 08:56:44,068 - INFO - [SELL CONFIRMED] 未知 | Yes | size=0.0000 price=0.33
+2026-07-27 08:56:59,825 - INFO - [SCREENER] 144 markets in 4.1s | yes:43 no:27 | next in 30s
+2026-07-27 08:57:35,059 - INFO - [SCREENER] 145 markets in 3.4s | yes:42 no:25 | next in 30s
+2026-07-27 08:58:10,210 - INFO - [SCREENER] 147 markets in 3.1s | yes:41 no:25 | next in 30s
+2026-07-27 08:58:45,078 - INFO - [SCREENER] 146 markets in 3.2s | yes:43 no:26 | next in 30s
+2026-07-27 08:58:57,404 - INFO - [BUY CONFIRMED] 未知 | Yes | size=100.0000 price=0.34
+2026-07-27 08:58:57,650 - ERROR - [BATCH CANCEL FAIL] 0x35daf95d9330dcf115... | order can't be found - already canceled or matched
+2026-07-27 08:58:58,442 - ERROR - [BATCH CANCEL] 1001616784634634 取消失败，清空 active_id 进入冷却兜底
+2026-07-27 08:59:20,816 - INFO - [SCREENER] 146 markets in 3.0s | yes:46 no:18 | next in 30s
+2026-07-27 08:59:55,517 - INFO - [SCREENER] 140 markets in 3.0s | yes:48 no:20 | next in 30s
+2026-07-27 09:00:32,554 - INFO - [SCREENER] 143 markets in 5.5s | yes:44 no:21 | next in 30s
+2026-07-27 09:01:08,869 - INFO - [SCREENER] 143 markets in 3.5s | yes:45 no:22 | next in 30s
+2026-07-27 09:01:44,047 - INFO - [SCREENER] 140 markets in 3.6s | yes:44 no:21 | next in 30s
+2026-07-27 09:02:18,655 - INFO - [SCREENER] 141 markets in 3.2s | yes:43 no:19 | next in 30s
+2026-07-27 09:02:53,444 - INFO - [SCREENER] 139 markets in 3.5s | yes:42 no:18 | next in 30s
+2026-07-27 09:03:29,752 - INFO - [SCREENER] 144 markets in 3.0s | yes:44 no:21 | next in 30s
+2026-07-27 09:04:06,064 - INFO - [SCREENER] 145 markets in 5.0s | yes:42 no:23 | next in 30s
+2026-07-27 09:04:41,445 - INFO - [SCREENER] 146 markets in 3.8s | yes:43 no:22 | next in 30s
+2026-07-27 09:05:17,995 - INFO - [SCREENER] 143 markets in 3.3s | yes:40 no:21 | next in 30s
+2026-07-27 09:05:52,785 - INFO - [SCREENER] 147 markets in 3.2s | yes:40 no:19 | next in 30s
+2026-07-27 09:06:27,423 - INFO - [SCREENER] 147 markets in 3.0s | yes:40 no:20 | next in 30s
+2026-07-27 09:07:02,366 - INFO - [SCREENER] 147 markets in 3.3s | yes:39 no:18 | next in 30s
+2026-07-27 09:07:39,012 - INFO - [SCREENER] 147 markets in 3.6s | yes:40 no:19 | next in 30s
+2026-07-27 09:08:14,342 - INFO - [SCREENER] 148 markets in 4.1s | yes:41 no:17 | next in 30s
+2026-07-27 09:08:50,520 - INFO - [SCREENER] 149 markets in 4.8s | yes:41 no:17 | next in 30s
+2026-07-27 09:09:27,432 - INFO - [SCREENER] 148 markets in 3.3s | yes:41 no:19 | next in 30s
+2026-07-27 09:09:52,384 - INFO - 收到停止信号，优雅退出...
+2026-07-27 09:09:52,658 - INFO - 开始优雅关闭...
+2026-07-27 09:09:52,902 - INFO - [CANCEL ALL] 106 已取消 | 系统关闭
+2026-07-27 09:09:52,903 - WARNING - [USER WS] close code=None reason=None
+2026-07-27 09:09:54,071 - INFO - [HEARTBEAT] 已停止
+2026-07-27 09:09:54,072 - INFO - ============================================================
+系统已停止
+============================================================

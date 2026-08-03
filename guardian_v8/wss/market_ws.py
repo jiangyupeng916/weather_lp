@@ -335,19 +335,30 @@ class MarketWS:
     # ── 消息路由与解析 ────────────────────────────────────────────────────────
 
     def _route(self, data) -> None:
-        # Polymarket WS 每条消息是 JSON 数组，可能包含多个事件对象
+        """Polymarket 消息路由：**无 type 字段，靠结构推断**。
+
+        - 数组 `[{market, asset_id, bids, asks}]` → book（订单簿快照）
+        - 对象 `{market, price_changes: [{asset_id, best_bid, ...}]}` → price_change
+        - 对象 `{market, asset_id, bids, asks}` → 单条 book 快照（已解包）
+        """
         if isinstance(data, list):
+            # 数组消息：展开每条 book 快照
             for item in data:
                 if isinstance(item, dict):
                     self._route(item)
             return
 
-        etype = data.get("event_type", "")
-        if etype == "book":
-            self._handle_book(data)
-        elif etype == "price_change":
+        if not isinstance(data, dict):
+            return
+
+        # 对象消息：通过关键字段推断类型
+        if "price_changes" in data:
+            # price_change 格式：{market, price_changes: [...]}
             self._handle_price_change(data)
-        # last_trade_price / tick_size_change 等暂不处理
+        elif "bids" in data or "asks" in data:
+            # book 格式：{market, asset_id, bids, asks}
+            self._handle_book(data)
+        # 其他类型（last_trade_price 等）暂不处理
 
     def _handle_book(self, data: dict) -> None:
         """全量订单簿快照：bids 从低到高排列，bids[-1] 是 best_bid。"""
@@ -369,45 +380,38 @@ class MarketWS:
             self._on_bid_changed_cb(asset_id, old_bid, new_bid)
 
     def _handle_price_change(self, data: dict) -> None:
-        """价格变动推送：payload.priceChanges 数组，每个元素含 bestBid/bestAsk。
+        """价格变动推送：price_changes 数组，每个元素含 asset_id + best_bid/best_ask。
 
-        Polymarket 实际格式（2024 年起）：
+        Polymarket 2026 实际格式（无 type 字段，通过结构推断）：
           {
-            "type": "price_change",
-            "payload": {
-              "market": "...",
-              "priceChanges": [
-                {
-                  "tokenId": "...",
-                  "price": "0.08",
-                  "side": "BUY",
-                  "bestBid": "0.08",  ← 在这里
-                  "bestAsk": "0.09"
-                }
-              ],
-              "timestamp": "..."
-            }
+            "market": "0xe79e...",
+            "price_changes": [
+              {
+                "asset_id": "46193...",
+                "price": "0.55",
+                "side": "BUY",
+                "best_bid": "0.64",  ← 在这里
+                "best_ask": "0.67"
+              }
+            ]
           }
 
-        旧实现误读顶层 data.get("best_bid")（永远 None）→ price_change 全丢。
-        已修正：从 payload.priceChanges[0] 读取（只处理第一个 tokenId，多 token
-        的 priceChanges 罕见且本 bot 按 token 订阅，一般只有一个）。
+        注意：字段名是 **asset_id**（不是 tokenId），直接在顶层（不是 payload 子树）。
         """
-        payload = data.get("payload", {})
-        changes = payload.get("priceChanges", [])
+        changes = data.get("price_changes", [])
         if not changes:
             return
 
         # 只取第一个 change（订阅单 token 时通常只有一个）
         change = changes[0]
-        token_id = change.get("tokenId", "")
-        if not token_id:
+        asset_id = change.get("asset_id", "")
+        if not asset_id:
             return
 
-        new_bid = _to_decimal(change.get("bestBid"))
+        new_bid = _to_decimal(change.get("best_bid"))
         if new_bid is None:
             return
 
-        old_bid, changed = self._cache.update(token_id, new_bid)
+        old_bid, changed = self._cache.update(asset_id, new_bid)
         if changed and self._on_bid_changed_cb:
-            self._on_bid_changed_cb(token_id, old_bid, new_bid)
+            self._on_bid_changed_cb(asset_id, old_bid, new_bid)
