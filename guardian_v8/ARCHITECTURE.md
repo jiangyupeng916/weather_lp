@@ -149,21 +149,26 @@ wss/  ← 未启用的市场频道 WSS 实现（cache/market_ws/guardian_wss/gua
 ## 六、主循环调度（当前实现）
 
 H1 第一小步已落地：单一 1s tick + `PeriodicScheduler` 独立计时器，删除旧的内层 `for _ in range(10)`。
-第二小步进行中：screener 已后台化（只算不写 + 单飞 + 结果队列），其余重 REST 待逐个迁移。
+第二小步已完成：全部重 REST（screener / discover / poll / audit / position）后台化（只算不写 + 单飞 + 结果队列），`_pending_ops` 跨线程竞态一并修复。
 
 ```python
 # guardian.run() 简化（scheduler.py: PeriodicScheduler + background.py: BackgroundDispatcher）
 bg_handlers = {"screener": _apply_screener_result,   # 后台任务名 → 主线程应用处理器
-               "discover": _apply_discover_result}
+               "discover": _apply_discover_result,
+               "poll":     _apply_poll_result,
+               "audit":    _apply_audit_result,
+               "position": lambda _p: None}           # check_positions 后台自闭环，无 apply
 
 scheduler = PeriodicScheduler()
-# screener / discover：到期时提交到后台（只算不写），单飞——上一次没跑完就跳过本次
+# 各任务到期时提交到后台（只算不写），单飞——上一次没跑完就跳过本次
 scheduler.add("screener", 30,  lambda: _bg.submit("screener", _screener_fetch),
               run_immediately=True)
-scheduler.add("discover", 30,  lambda: _bg.submit("discover", _discover_fetch))  # 已后台化
-scheduler.add("poll",     3,   _poll_best_bids)                       # 仍同步阻塞 REST（待迁）
-scheduler.add("audit",    120, audit)                                 # 仍同步阻塞 REST（待迁）
-scheduler.add("position", 120, check_positions)                       # 仍同步阻塞 REST（待迁）
+scheduler.add("discover", 30,  lambda: _bg.submit("discover", _discover_fetch))
+# poll：token_ids 快照在主线程取（lambda 由 tick 在主线程调用），传给后台 _poll_fetch
+scheduler.add("poll",     3,   lambda: _bg.submit("poll", _poll_fetch,
+                                                  list(_markets.keys())))
+scheduler.add("audit",    120, lambda: _bg.submit("audit", _audit_fetch))
+scheduler.add("position", 120, lambda: _bg.submit("position", check_positions))
 scheduler.add("prune",    300, _prune_caches)
 while running:
     try:
@@ -180,13 +185,13 @@ while running:
 
 `PeriodicScheduler`（`scheduler.py`）是纯调度逻辑：每任务持有 `interval` + `last_run`，`tick()` 逐个判断到期。**触发前先更新 `last_run`** → 回调抛异常也不热循环；**逐任务 try/except** → 一个任务失败不影响同 tick 其他任务。用注入的 `now_fn`（假时钟）可脱离网络单测，见 `tests/test_scheduler.py`（6 例全过）。
 
-### 6.1 结构性问题：一个已修，一个待第二小步
+### 6.1 结构性问题：两个都已修
 
 **问题 B — best_bid 轮询实际约 10s 而非 3s ✅ 已修（第一小步）**
 旧代码内层 `for _ in range(10): time.sleep(1)` 固定占 ~10s，外层计时器每 ~10s 才求值一次，`best_bid_poll_interval=3.0` 永远达不到。改单一 1s tick 后，各计时器每 1s 求值，poll 回到真正的 3s 粒度（无阻塞时）。
 
-**问题 A — 阻塞 REST 冻结状态机 ⏳ 第二小步进行中（screener + discover 已后台化）**
-最重的 `screener`（`/sampling-markets` 分页 × 每页最多 5 次重试 × 退避 2/4/6/8s × timeout 30s，再叠加 `analyze_orderbooks` 所有批次，最坏堵**几十秒到数分钟**）已拆为后台 `_screener_fetch`（只算不写）+ 主线程 `_apply_screener_result`（写 `_markets`）。`discover` 同样拆为后台 `_discover_fetch`（只发 `open_orders()` 分页查询）+ 主线程 `_apply_discover_result`（STOPPED 清理 + 新市场注册 + CSV 同步）。两者均经 `BackgroundDispatcher` 单飞调度、结果队列回传。`_poll_best_bids` / `audit` / `check_positions` 仍同步阻塞，待逐个按同一模式迁移。
+**问题 A — 阻塞 REST 冻结状态机 ✅ 已修（第二小步，全部后台化）**
+全部重 REST 任务（screener / discover / poll / audit / position）已从主线程剥离，跑在 `BackgroundDispatcher` 线程池里「只算不写」，产出结果经队列回传，主线程 1s tick 用 `_apply_*` 应用到 `_markets`。主线程 tick 只剩毫秒级轻活（cooldown 检查、pending 回写、结果应用），不再被任何 REST 阻塞。核心不变量「主线程独占 `_markets` 无锁」保持不变——后台线程绝不读写 `_markets`（poll 需要的 token_ids 由主线程快照后作参数传入）。
 
 ---
 
@@ -204,9 +209,9 @@ while running:
 
 **验证**：本地 pytest 全过；服务器上 `guardian.log` 中 `[POLL]` 日志间隔应回到 ~3s（无 screener 阻塞时），各任务按各自间隔出现。
 
-#### 第二小步 ⏳ 进行中：重 REST 后台化「只算不写」
+#### 第二小步 ✅ 已完成：重 REST 全部后台化「只算不写」
 
-基础设施 + screener + discover 迁移已落地，其余任务待逐个迁移。
+基础设施 + 全部 5 个重 REST 任务已迁移，`_pending_ops` 跨线程竞态已修。
 
 1. **基础设施 `background.py`（`BackgroundDispatcher`）✅**：`ThreadPoolExecutor` + 结果队列 + 单飞注册表（锁保护的 `set`）。`submit(name, fn)` 同名在跑时返回 `False` 跳过本次；后台线程只跑纯函数，`(name, ok, result)` 入队；`drain()` 主线程非阻塞取出。异常统一在 `_run` 里捕获记录并作为失败结果入队。`tests/test_background.py` 6 例本地验证。
 
@@ -214,11 +219,17 @@ while running:
 
 3. **discover 后台化 ✅**：`discover` 拆为后台 `_discover_fetch`（只调 `open_orders()`，唯一阻塞的 SDK 分页 REST，零 `_markets` 访问；返回 None 时抛异常由 dispatcher 记录）+ 主线程 `_apply_discover_result`（清理 STOPPED 市场 + 注册新市场 + `_sync_from_file` + 日志，全部写 `_markets`）。STOPPED 清理由「REST 前」移到「结果返回后」，对正确性无影响。首次触发仍在 `discover_interval` 后（不 `run_immediately`，与迁移前一致）。
 
-4. **其余任务待迁移 ⏳**：`audit` / `check_positions` / `_poll_best_bids` 按同一「后台 fetch + 主线程 apply」模式逐个迁移。
+4. **poll 后台化 ✅**：`_poll_best_bids` 拆为后台 `_poll_fetch(token_ids)`（批量查 `/books`，token_ids 由主线程调度时快照传入，零 `_markets` 访问）+ 主线程 `_apply_poll_result`（更新 `ms.best_bid/ask` + 收集撤单 + `_batch_cancel`）。
 
-5. **顺带修 `_pending_ops` 竞态 ⏳**：即时卖单线程不再直接 `append`，改为把"待挂卖单请求"放进结果队列，由主线程统一 append 到 `_pending_ops`。恢复"只有主线程碰 `_pending_ops`"。
+5. **audit 后台化 ✅**：`audit` 拆为后台 `_audit_fetch`（`open_orders()` + 批量 best_bid 两次 REST，返回 `(orders, best_bid_map)`，None 时走降级）+ 主线程 `_apply_audit_result`（状态校验 + 超价纠偏 + 重复订单清理，全部写 `_markets`）。
 
-**验证**：screener 慢时即时卖单/撤单回写不再被拖延；`_pending_ops` 无跨线程写入。
+6. **check_positions 后台化 ✅**：整个 `check_positions` 在后台自成闭环——**零 `_markets` 访问**（只读 `positions()`/`open_orders()`/`best_ask`），卖单互斥走 `_sell_lock`+`_selling`，pending 走收件箱。无 apply 阶段，`bg_handlers["position"]` 为 no-op。
+
+7. **`_pending_ops` 竞态已修 ✅**：新增 thread-safe 收件箱 `_pending_ops_inbox`（`queue.Queue`）。后台 `check_positions` 与守护线程 `_sell_single_position` 不再直接 `append`，改投 `_enqueue_pending_op`；主线程 `_check_pending_ops` 开头统一收编。恢复「只有主线程碰 `_pending_ops`」。顺带修 `limit_sell_triggered` 无处理器缺陷：卖单结果日志移到 ms 门禁之前（持仓 token 常不在 `_markets`，原先被门禁静默丢弃）。
+
+**验证**：本地 `py_compile` + 12 例 pytest（scheduler 6 + background 6）全过。服务器上 screener 慢时 `[POLL]`/`[SELL-TRIGGER]`/`[LIMIT SELL]` 回写不再被拖延；`_pending_ops` 无跨线程写入。
+
+**已知遗留**：`wss/guardian_wss.py` 覆盖并 `super()._poll_best_bids()`，该方法已改名 → 该子类现已失效。但它无入口点（`python -m wss.main` 不存在，从不运行），第二轮 WSS 融入 `Guardian` 时一并删除。
 
 ### 第二轮 —— WSS 实时（下一轮）
 

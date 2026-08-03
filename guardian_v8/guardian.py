@@ -16,6 +16,7 @@ import csv
 import json
 import logging
 import os
+import queue
 import random
 import signal
 import threading
@@ -78,7 +79,10 @@ class Guardian:
         self._markets: Dict[str, MarketState] = {}
         self._file_managed_ids: Set[str] = set()
         # pending: [(future, token_id, op_type, metadata), ...]
+        # 只有主线程读写；后台/守护线程要追加时走 _pending_ops_inbox（线程安全队列），
+        # 主线程每 tick 在 _check_pending_ops 开头统一 drain 进来 —— 恢复「只有主线程碰 _pending_ops」。
         self._pending_ops: List[Tuple[Any, str, str, Dict[str, Any]]] = []
+        self._pending_ops_inbox: "queue.Queue[Tuple[Any, str, str, Dict[str, Any]]]" = queue.Queue()
         # 筛选器已移除、等待撤单完成的市场（替代字符串匹配，更可靠）
         self._removed_by_screener: Set[str] = set()
 
@@ -376,7 +380,22 @@ class Guardian:
                     continue
                 self._trigger_place(token_id)
 
+    def _enqueue_pending_op(self, op_tuple):
+        """【任意线程】把 (future, token_id, op_type, meta) 放进收件箱。
+
+        后台/守护线程不再直接 append self._pending_ops——改投 thread-safe 队列，
+        由主线程 _check_pending_ops 开头统一收编。恢复「只有主线程碰 _pending_ops」。
+        """
+        self._pending_ops_inbox.put(op_tuple)
+
     def _check_pending_ops(self, now: float):
+        # 先收编后台/守护线程投递的 pending op（主线程独占 _pending_ops 的唯一入口）
+        while True:
+            try:
+                self._pending_ops.append(self._pending_ops_inbox.get_nowait())
+            except queue.Empty:
+                break
+
         completed = []
         for i, (fut, token_id, op, meta) in enumerate(self._pending_ops):
             if not fut.done():
@@ -414,6 +433,18 @@ class Guardian:
                     logger.error("[AUDIT] 重复买单撤销异常")
                 continue
 
+            # 卖单结果只打日志、不改状态机（卖出走 _selling 独立跟踪，与 _markets 状态机无关）。
+            # 放在 ms 门禁之前：持仓 token 常不在 _markets 里，若门禁拦掉会静默丢失卖单确认日志。
+            if op in ("limit_sell", "limit_sell_triggered"):
+                tag = "LIMIT SELL" if op == "limit_sell" else "SELL-TRIGGER"
+                if result:
+                    logger.debug("[%s] %s 卖单已挂 id=%s price=%s",
+                                 tag, token_id[:16], str(result)[:20], meta.get("price"))
+                else:
+                    logger.error("[%s] %s 卖单失败 price=%s",
+                                 tag, token_id[:16], meta.get("price"))
+                continue
+
             ms = self._markets.get(token_id)
             if not ms:
                 continue
@@ -437,13 +468,6 @@ class Guardian:
                 success = result is not None
                 self._handle_place_result(ms, token_id, success,
                                            result if success else None, meta["price"])
-            elif op == "limit_sell":
-                if result:
-                    logger.debug("[LIMIT SELL] %s 卖单已挂 id=%s price=%s",
-                                token_id[:16], str(result)[:20], meta.get("price"))
-                else:
-                    logger.error("[LIMIT SELL] %s 卖单失败 price=%s",
-                                token_id[:16], meta.get("price"))
 
         for i in reversed(completed):
             self._pending_ops.pop(i)
@@ -676,13 +700,16 @@ class Guardian:
         logger.debug("[DISCOVER] 守护 %d 个市场", len(self._markets))
 
     # ── 批量轮询最佳买价 ──────────────────────────────────────────────────────
-    def _poll_best_bids(self):
-        token_ids = list(self._markets.keys())
-        if not token_ids:
-            return
+    def _poll_fetch(self, token_ids):
+        """【后台线程】批量查 /books，纯 REST，零 _markets 访问。
 
-        polled = 0
-        cancels: List[str] = []
+        token_ids 由主线程调度时快照传入（后台绝不读 self._markets）。
+        返回扁平的 book item 列表，主线程 _apply_poll_result 应用。
+        分块失败只跳过该块，成功块照常返回（与旧逐块 continue 语义一致）。
+        """
+        if not token_ids:
+            return []
+        items: List[dict] = []
         for chunk in self._chunk_list(token_ids, 500):
             try:
                 r = requests.post(
@@ -697,52 +724,59 @@ class Guardian:
             except Exception as e:
                 logger.error("[POLL] 批量查询异常: %s", e)
                 continue
+            if isinstance(books, list):
+                items.extend(books)
+        return items
 
-            for item in (books if isinstance(books, list) else []):
-                aid = item.get("asset_id", "")
-                ms = self._markets.get(aid)
-                if not ms or ms.state is ActorState.STOPPED:
-                    continue
+    def _apply_poll_result(self, items):
+        """【主线程】应用 best_bid 变化：更新 ms、收集撤单、触发批量撤单。"""
+        polled = 0
+        cancels: List[str] = []
+        for item in items:
+            aid = item.get("asset_id", "")
+            ms = self._markets.get(aid)
+            if not ms or ms.state is ActorState.STOPPED:
+                continue
 
-                bids = item.get("bids", [])
-                if not bids:
-                    continue
+            bids = item.get("bids", [])
+            if not bids:
+                continue
 
-                best_bid_str = bids[-1].get("price", "")
-                best_ask_str = ""
-                asks = item.get("asks", [])
-                if asks:
-                    best_ask_str = asks[-1].get("price", "")
+            best_bid_str = bids[-1].get("price", "")
+            best_ask_str = ""
+            asks = item.get("asks", [])
+            if asks:
+                best_ask_str = asks[-1].get("price", "")
 
-                if not best_bid_str:
-                    continue
+            if not best_bid_str:
+                continue
 
-                new_bid = safe_decimal(best_bid_str)
-                new_ask = safe_decimal(best_ask_str)
+            new_bid = safe_decimal(best_bid_str)
+            new_ask = safe_decimal(best_ask_str)
 
-                if ms.best_bid is None:
-                    ms.best_bid = new_bid
-                    ms.best_ask = new_ask
-                    logger.debug("[BID INIT] %s best_bid=%s", aid[:16], new_bid)
-                    polled += 1
-                    continue
-
-                if new_bid == ms.best_bid:
-                    continue
-
+            if ms.best_bid is None:
                 ms.best_bid = new_bid
                 ms.best_ask = new_ask
-                logger.debug("[BID] %s best_bid=%s state=%s", aid[:16], new_bid, ms.state.name)
+                logger.debug("[BID INIT] %s best_bid=%s", aid[:16], new_bid)
                 polled += 1
+                continue
 
-                if ms.state is ActorState.RESTING:
-                    cancels.append(aid)
-                elif ms.state is ActorState.NO_ORDER and ms.cooldown_until <= time.time():
-                    if aid in self._removed_by_screener:
-                        ms.state = ActorState.STOPPED
-                        ms.state_at = time.time()
-                    else:
-                        self._start_cooldown(ms, self.cfg.maker_cooldown)
+            if new_bid == ms.best_bid:
+                continue
+
+            ms.best_bid = new_bid
+            ms.best_ask = new_ask
+            logger.debug("[BID] %s best_bid=%s state=%s", aid[:16], new_bid, ms.state.name)
+            polled += 1
+
+            if ms.state is ActorState.RESTING:
+                cancels.append(aid)
+            elif ms.state is ActorState.NO_ORDER and ms.cooldown_until <= time.time():
+                if aid in self._removed_by_screener:
+                    ms.state = ActorState.STOPPED
+                    ms.state_at = time.time()
+                else:
+                    self._start_cooldown(ms, self.cfg.maker_cooldown)
 
         if cancels:
             self._batch_cancel(cancels, "best_bid变化")
@@ -811,18 +845,16 @@ class Guardian:
                 self._start_cooldown(ms, self.cfg.maker_cooldown)
         logger.debug("[AUDIT] 降级完成（订单查询失败，跳过订单校验）")
 
-    def audit(self):
-        logger.debug("[AUDIT] 开始...")
+    def _audit_fetch(self):
+        """【后台线程】审计的两次阻塞 REST：open_orders + 批量 best_bid。
+
+        H1 第二小步：只做网络查询，零 _markets 访问。返回 (orders, best_bid_map)。
+        open_orders 失败时返回 (None, {})，主线程据此走降级审计。
+        """
         orders = self.open_orders()
         if orders is None:
-            # API 查询失败，仅处理状态超时，跳过依赖订单列表的检查
-            self._audit_timeouts_only()
-            return
-        order_map = {o.order_id: o for o in orders}
+            return (None, {})
         buys = [o for o in orders if o.side.upper() == "BUY"]
-        now = time.time()
-
-        # 批量查询 best_bid
         best_bid_map: Dict[str, Decimal] = {}
         if buys:
             for chunk in self._chunk_list(list({o.token_id for o in buys}), 500):
@@ -839,6 +871,18 @@ class Guardian:
                                 best_bid_map[item["asset_id"]] = Decimal(bids[-1].get("price", "0"))
                 except Exception as e:
                     logger.error("[AUDIT] 批量查询 best_bid 失败: %s", e)
+        return (orders, best_bid_map)
+
+    def _apply_audit_result(self, payload):
+        """【主线程】应用审计结果：状态校验 + 纠偏 + 重复订单清理（全部写 _markets）。"""
+        orders, best_bid_map = payload
+        if orders is None:
+            # API 查询失败，仅处理状态超时，跳过依赖订单列表的检查
+            self._audit_timeouts_only()
+            return
+        order_map = {o.order_id: o for o in orders}
+        buys = [o for o in orders if o.side.upper() == "BUY"]
+        now = time.time()
 
         # 逐个市场审计
         for token_id, ms in list(self._markets.items()):
@@ -1109,7 +1153,8 @@ class Guardian:
                 logger.info("[LIMIT SELL] %s | %.4f shares @ %s (maker)",
                            p.get("title", "未知")[:40], bal, ba)
                 fut = self.exec_layer.limit_sell(tid, bal, ba, self.cfg.tick_size)
-                self._pending_ops.append((fut, tid, "limit_sell", {"price": ba}))
+                # 【后台线程】不直接 append，改投收件箱由主线程收编（_pending_ops 主线程独占）
+                self._enqueue_pending_op((fut, tid, "limit_sell", {"price": ba}))
                 placed += 1
             finally:
                 with self._sell_lock:
@@ -1209,7 +1254,8 @@ class Guardian:
 
             logger.info("[SELL-TRIGGER] BUY成交触发挂单 %s | %.4f shares @ %s", tid[:16], bal, bb)
             fut = self.exec_layer.limit_sell(tid, bal, bb, self.cfg.tick_size)
-            self._pending_ops.append((fut, tid, "limit_sell_triggered", {"price": bb}))
+            # 守护线程 → 收件箱，由主线程 _check_pending_ops 收编（不直接碰 _pending_ops）
+            self._enqueue_pending_op((fut, tid, "limit_sell_triggered", {"price": bb}))
 
         except Exception as e:
             logger.error("[SELL-TRIGGER] %s 处理异常: %s", tid[:16], e, exc_info=True)
@@ -1281,8 +1327,11 @@ class Guardian:
             on_message=self.ws_router.on_user_message,
         )
 
-        # 3. 发现已有订单
-        self.discover()
+        # 3. 发现已有订单（启动阶段主线程同步执行一次，播种 _markets 后再进主循环）
+        try:
+            self._apply_discover_result(self._discover_fetch())
+        except Exception as e:
+            logger.error("[DISCOVER] 启动发现失败: %s", e)
 
         # 4. 主循环（H1 第一步：单一 1s tick + 独立计时器）
         #    调度粒度回到真正的 1s —— poll 不再被旧的内层 10×1s 循环拖成 ~10s。
@@ -1291,20 +1340,33 @@ class Guardian:
         bg_handlers = {
             "screener": self._apply_screener_result,
             "discover": self._apply_discover_result,
+            "poll": self._apply_poll_result,
+            "audit": self._apply_audit_result,
+            # position：整个 check_positions 在后台自成闭环（零 _markets 访问，
+            # 卖单互斥走 _selling、pending 走收件箱），无 apply 阶段 →
+            # no-op 处理器，避免 _drain_background 报"无处理器"。
+            "position": lambda _payload: None,
         }
 
         scheduler = PeriodicScheduler()
-        # screener：到期时提交到后台（只算不写），单飞——上一次没跑完就跳过本次。
+        # 各周期任务到期时提交到后台（只算不写），单飞——上一次没跑完就跳过本次。
+        # _markets 写入一律在主线程 _drain_background / _apply_* 里发生。
         scheduler.add("screener", self.cfg.screener_interval,
                       lambda: self._bg.submit("screener", self._screener_fetch),
                       run_immediately=True)
-        # discover：同上，只有 open_orders() REST 在后台跑，_markets 写入在主线程。
+        # discover：只有 open_orders() REST 在后台跑，_markets 写入在主线程。
         # 不 run_immediately——与迁移前一致，首次在 discover_interval 后触发。
         scheduler.add("discover", self.cfg.discover_interval,
                       lambda: self._bg.submit("discover", self._discover_fetch))
-        scheduler.add("poll", self.cfg.best_bid_poll_interval, self._poll_best_bids)
-        scheduler.add("audit", self.cfg.audit_interval, self.audit)
-        scheduler.add("position", self.cfg.position_interval, self.check_positions)
+        # poll：token_ids 快照在主线程取（此 lambda 由 scheduler.tick 在主线程调用），
+        # 传给后台 _poll_fetch 查 /books；结果由 _apply_poll_result 应用。
+        scheduler.add("poll", self.cfg.best_bid_poll_interval,
+                      lambda: self._bg.submit("poll", self._poll_fetch,
+                                              list(self._markets.keys())))
+        scheduler.add("audit", self.cfg.audit_interval,
+                      lambda: self._bg.submit("audit", self._audit_fetch))
+        scheduler.add("position", self.cfg.position_interval,
+                      lambda: self._bg.submit("position", self.check_positions))
         scheduler.add("prune", self.cfg.cache_prune_interval, self._prune_caches)
 
         while self.running:
