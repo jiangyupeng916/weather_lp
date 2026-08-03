@@ -34,6 +34,7 @@ from execution import ExecutionLayer
 from ws_manager import WSManager
 from ws_router import WSRouter
 from scheduler import PeriodicScheduler
+from background import BackgroundDispatcher
 
 logger = logging.getLogger("guardian")
 
@@ -70,6 +71,8 @@ class Guardian:
         self.exec_layer = ExecutionLayer(self.client, self.cfg)
         self.ws_manager = WSManager(self.cfg)
         self.ws_router = WSRouter(self)
+        # 后台调度：重 REST（screener 等）「只算不写」，结果回主线程应用（H1 第二步）
+        self._bg = BackgroundDispatcher()
 
         # ── 市场状态（集中式，主线程直读直写） ─────────────────────────────────
         self._markets: Dict[str, MarketState] = {}
@@ -474,7 +477,7 @@ class Guardian:
         """将目标列表同步到 _markets：新增则创建状态，移除则停止监控并取消订单。
 
         targets: [(token_id, title), ...]
-        此方法供 _sync_from_file (CSV 回退) 和 _run_screener (内存直传) 共用。
+        此方法供 _sync_from_file (CSV 回退) 和 _apply_screener_result (内存直传) 共用。
 
         移除市场时，若有活跃订单则先触发异步撤单，但保留 MarketState 在
         _markets 中直到撤单完成。避免 discover() 在撤单完成前重新发现该订单
@@ -527,23 +530,27 @@ class Guardian:
             return
         self._apply_market_targets(targets)
 
-    def _run_screener(self):
-        """内置筛选器：拉取+评分+筛选，内存直传更新 _markets，同时输出 CSV 供人工查看。"""
+    def _screener_fetch(self):
+        """【后台线程】筛选器纯计算：拉取+评分+筛选+构建目标。
+
+        H1 第二小步：只读 self.cfg（冻结的 dataclass）、只做网络查询与计算，
+        绝不触碰 self._markets —— 保住「主线程独占 _markets 无锁」不变量。
+        返回一个 payload dict，由主线程 _apply_screener_result 应用。
+        异常直接抛出，由 BackgroundDispatcher 统一捕获记录（不在此吞掉）。
+        """
         from screener import fetch_and_filter, analyze_orderbooks
 
         t0 = time.time()
-        try:
-            candidates = fetch_and_filter(self.cfg)
-            scored = analyze_orderbooks(candidates, self.cfg)
-            # 过滤现有流动性不足的市场
-            scored = [m for m in scored
-                      if m.existing_total_size >= self.cfg.screener_min_existing_size]
-        except Exception as e:
-            logger.error("[SCREENER] 筛选失败: %s", e)
-            return
+        candidates = fetch_and_filter(self.cfg)
+        scored = analyze_orderbooks(candidates, self.cfg)
+        # 过滤现有流动性不足的市场
+        scored = [m for m in scored
+                  if m.existing_total_size >= self.cfg.screener_min_existing_size]
 
         # 构建目标列表（与旧 CSV 输出逻辑一致：深度阈值检查每个方向）
         targets: List[Tuple[str, str]] = []
+        yes_count = 0
+        no_count = 0
         for m in scored:
             title = m.question
             yes_ok = (m.yes_top3_bids >= self.cfg.screener_min_top3_bids
@@ -554,26 +561,29 @@ class Guardian:
                      and m.no_top1_bids >= self.cfg.screener_min_top1_bids)
             if yes_ok:
                 targets.append((m.yes_token_id, f"{title} [YES]" if title else ""))
+                yes_count += 1
             if no_ok:
                 targets.append((m.no_token_id, f"{title} [NO]" if title else ""))
+                no_count += 1
 
-        # 直接内存同步
-        self._apply_market_targets(targets)
+        return {
+            "scored": scored,
+            "targets": targets,
+            "yes_count": yes_count,
+            "no_count": no_count,
+            "elapsed": time.time() - t0,
+        }
 
+    def _apply_screener_result(self, payload):
+        """【主线程】应用筛选结果：写 _markets + 输出 CSV + 日志。"""
+        scored = payload["scored"]
+        # 直接内存同步（唯一 _markets 写入点，主线程）
+        self._apply_market_targets(payload["targets"])
         # CSV 输出（调试用）
         self._save_screener_csv(scored)
-
-        elapsed = time.time() - t0
-        yes_count = sum(1 for m in scored
-                        if m.yes_top3_bids >= self.cfg.screener_min_top3_bids
-                        and m.yes_top2_bids >= self.cfg.screener_min_top2_bids
-                        and m.yes_top1_bids >= self.cfg.screener_min_top1_bids)
-        no_count = sum(1 for m in scored
-                       if m.no_top3_bids >= self.cfg.screener_min_top3_bids
-                       and m.no_top2_bids >= self.cfg.screener_min_top2_bids
-                       and m.no_top1_bids >= self.cfg.screener_min_top1_bids)
         logger.info("[SCREENER] %d markets in %.1fs | yes:%d no:%d | next in %ds",
-                    len(scored), elapsed, yes_count, no_count,
+                    len(scored), payload["elapsed"],
+                    payload["yes_count"], payload["no_count"],
                     int(self.cfg.screener_interval))
 
     def _save_screener_csv(self, scored):
@@ -1269,8 +1279,15 @@ class Guardian:
         # 4. 主循环（H1 第一步：单一 1s tick + 独立计时器）
         #    调度粒度回到真正的 1s —— poll 不再被旧的内层 10×1s 循环拖成 ~10s。
         #    周期任务此时仍同步执行（阻塞问题由 H1 第二步「后台化」解决）。
+        # 后台结果 → 主线程应用处理器（key = BackgroundDispatcher 任务名）
+        bg_handlers = {
+            "screener": self._apply_screener_result,
+        }
+
         scheduler = PeriodicScheduler()
-        scheduler.add("screener", self.cfg.screener_interval, self._run_screener,
+        # screener：到期时提交到后台（只算不写），单飞——上一次没跑完就跳过本次。
+        scheduler.add("screener", self.cfg.screener_interval,
+                      lambda: self._bg.submit("screener", self._screener_fetch),
                       run_immediately=True)
         scheduler.add("discover", self.cfg.discover_interval, self.discover)
         scheduler.add("poll", self.cfg.best_bid_poll_interval, self._poll_best_bids)
@@ -1287,6 +1304,7 @@ class Guardian:
                 self._check_cooldowns(now)
                 self._check_pending_ops(now)      # 回写撤单/挂单结果
                 self._check_pending_sells()       # 消费 BUY 成交即时卖单队列
+                self._drain_background(bg_handlers)  # 应用后台任务结果（主线程写 _markets）
             except Exception as e:
                 logger.error("主循环异常: %s", e, exc_info=True)
             time.sleep(1)
@@ -1294,8 +1312,30 @@ class Guardian:
         # 6. 优雅关闭
         self._shutdown()
 
+    def _drain_background(self, handlers):
+        """【主线程】取出后台任务结果并应用。
+
+        后台线程只产出「结果 payload」，所有 _markets 写入都在这里发生 ——
+        保住主线程独占 _markets 无锁的不变量。失败结果已由 BackgroundDispatcher
+        记录日志，这里只跳过（下个周期 scheduler 会重新提交）。
+        """
+        for name, ok, payload in self._bg.drain():
+            if not ok:
+                continue  # 异常已在 BackgroundDispatcher._run 里 log
+            handler = handlers.get(name)
+            if handler is None:
+                logger.warning("[BG] 无处理器的后台结果: %s", name)
+                continue
+            try:
+                handler(payload)
+            except Exception as e:
+                logger.error("[BG] 应用 %s 结果异常: %s", name, e, exc_info=True)
+
     def _shutdown(self):
         logger.info("开始优雅关闭...")
+
+        # 停止后台调度器（纯计算任务，不必等待收尾）
+        self._bg.shutdown(wait=False)
 
         # 一次 API 调用取消所有活跃订单
         fut = self.exec_layer.cancel_all("系统关闭")
