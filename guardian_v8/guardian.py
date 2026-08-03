@@ -943,15 +943,19 @@ class Guardian:
         tid = data.get("id", "")
         status = str(data.get("status", "")).upper()
 
-        # ── 去重：同一 trade_id 只处理一次（MINED/CONFIRMED 共用相同 id）──────
+        # 仅处理 CONFIRMED；MATCHED/MINED 时链上余额尚未到账，跳过。
+        # 【必须先过滤 status，再去重】同一笔成交会依次推送
+        # MATCHED→MINED→CONFIRMED，三者共用同一 trade id。若先去重，
+        # 先到的 MATCHED/MINED 会占用去重槽位，导致同 id 的 CONFIRMED
+        # 被误判为"已处理"而丢弃 → trades.log 恒空、即时卖单从不触发。
+        if status != "CONFIRMED":
+            return
+
+        # ── 去重：同一 trade_id 的 CONFIRMED 只处理一次 ──────────────────────
         with self._trade_lock:
             if tid in self._processed_trades:
                 return
             self._processed_trades[tid] = time.time()
-
-        # 仅处理 CONFIRMED；MINED 时链上余额尚未到账，跳过
-        if status != "CONFIRMED":
-            return
 
         # ── 从 maker_orders 找我们自己的成交 ──────────────────────────────────
         maker_orders = data.get("maker_orders") or []
