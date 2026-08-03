@@ -296,7 +296,7 @@ class MarketWS:
                         self._debug_sample_count, json.dumps(data, ensure_ascii=False)[:500])
 
         # 临时诊断：记录收到的消息类型分布（每 100 条汇总一次，避免刷屏）
-        msg_type = data.get("type", "unknown")
+        msg_type = data.get("type", "unknown") if isinstance(data, dict) else "array"
         if not hasattr(self, "_msg_type_counter"):
             self._msg_type_counter = {}
             self._msg_total = 0
