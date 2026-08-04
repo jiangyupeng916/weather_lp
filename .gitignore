@@ -1,20 +1,14 @@
-# 敏感文件
-.env
-.env.*
-
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.egg-info/
-dist/
-build/
+*$py.class
+*.so
+.Python
 
-# pytest
-.pytest_cache/
-
-# 日志
-data/*.log
+# Virtual environment
+venv/
+env/
+ENV/
 
 # IDE
 .vscode/
@@ -22,6 +16,41 @@ data/*.log
 *.swp
 *.swo
 
-# 系统文件
+# OS
+.DS_Store
 Thumbs.db
-Desktop.ini
+
+# Project specific - 根目录 V7 文件（本地保留，git 忽略）
+/ARCHITECTURE.md
+/LOGIC.md
+/config.py
+/execution.py
+/guardian.py
+/heartbeat.py
+/main.py
+/models.py
+/utils.py
+/ws_manager.py
+/ws_router.py
+/screener/
+/tests/
+/wss/
+/data/
+/deploy/
+/loggg/
+/gg.log
+/polymarket-liquidity-monitor-python/
+
+# Credentials (NEVER commit)
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+nohup.out
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
