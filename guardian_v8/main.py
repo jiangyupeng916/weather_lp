@@ -24,7 +24,12 @@ import os
 import sys
 
 # ── 实例切换 ──────────────────────────────────────────────────────────────────
-INSTANCE = "bot1"   # 切换为 "bot2" 即可运行第二个账号
+# 优先级：命令行参数 > 环境变量 INSTANCE > 默认 bot1。
+#   python main.py          → bot1（向后兼容，与旧行为一致）
+#   python main.py bot2     → bot2
+#   INSTANCE=bot2 python main.py → bot2
+# 两个实例读不同 .env.<instance>、写不同 data/<instance>/，无共享状态可同时运行。
+INSTANCE = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("INSTANCE", "bot1"))
 
 # ── 加载环境变量（必须在导入 Config 之前）─────────────────────────────────────
 # 注意：Config 类字段中的 os.environ.get() 在类定义（import）时立即求值，
