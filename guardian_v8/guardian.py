@@ -732,6 +732,8 @@ class Guardian:
                 active_id=o.order_id,
                 active_price=safe_decimal(o.price),
             )
+            # 注册到 file-managed 集合，使其纳入筛选器移除循环的管理范围
+            self._file_managed_ids.add(tid)
 
         # 从 CSV 文件同步
         self._sync_from_file()
