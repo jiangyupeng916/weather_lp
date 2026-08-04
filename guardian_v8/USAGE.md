@@ -151,19 +151,19 @@ tail -f /root/weather_lp/guardian_v8/data/bot1/guardian.log
 #### 错误和警告
 
 ```bash
-grep -E "ERROR|WARNING|CRITICAL" data/bot1/guardian.log | tail -50
+grep -E "ERROR|WARNING|CRITICAL" /root/weather_lp/guardian_v8/data/bot1/guardian.log | tail -50
 ```
 
 #### 心跳状态
 
 ```bash
-grep "HEARTBEAT" data/bot1/guardian.log | tail -20
+grep "HEARTBEAT" /root/weather_lp/guardian_v8/data/bot1/guardian.log | tail -20
 ```
 
 #### WebSocket 可用率（新增）
 
 ```bash
-grep "WS STATS" data/bot1/guardian.log | tail -10
+grep "WS STATS" /root/weather_lp/guardian_v8/data/bot1/guardian.log | tail -10
 ```
 
 **预期输出**：
@@ -174,7 +174,7 @@ grep "WS STATS" data/bot1/guardian.log | tail -10
 #### WebSocket 实时撤单（新增）
 
 ```bash
-grep "WS bid变化" data/bot1/guardian.log | wc -l
+grep "WS bid变化" /root/weather_lp/guardian_v8/data/bot1/guardian.log | wc -l
 ```
 
 **预期**：数十到数百条（说明 WS 实时监控生效）
@@ -182,7 +182,7 @@ grep "WS bid变化" data/bot1/guardian.log | wc -l
 #### 卖出触发（新增）
 
 ```bash
-grep "SELL-TRIGGER" data/bot1/guardian.log | tail -20
+grep "SELL-TRIGGER" /root/weather_lp/guardian_v8/data/bot1/guardian.log | tail -20
 ```
 
 ### 4.3 进入 screen 查看
@@ -299,7 +299,7 @@ python -c "import polymarket; print(polymarket.__version__)"
 **排查**：
 
 ```bash
-grep "HEARTBEAT" data/bot1/guardian.log | tail -20
+grep "HEARTBEAT" /root/weather_lp/guardian_v8/data/bot1/guardian.log | tail -20
 # 看是否有连续失败
 ```
 
@@ -312,7 +312,7 @@ grep "HEARTBEAT" data/bot1/guardian.log | tail -20
 **A. 检查 WS 连接状态**
 
 ```bash
-grep -E "MarketWS.*已连接|WS断线" data/bot1/guardian.log | tail -10
+grep -E "MarketWS.*已连接|WS断线" /root/weather_lp/guardian_v8/data/bot1/guardian.log | tail -10
 ```
 
 **预期**：看到 `[MarketWS] 已连接，订阅 N 个市场`，无频繁断线
@@ -320,7 +320,7 @@ grep -E "MarketWS.*已连接|WS断线" data/bot1/guardian.log | tail -10
 **B. 检查 WS bid 变化日志**
 
 ```bash
-grep "WS bid变化" data/bot1/guardian.log | wc -l
+grep "WS bid变化" /root/weather_lp/guardian_v8/data/bot1/guardian.log | wc -l
 ```
 
 **预期**：数十到数百条
@@ -332,7 +332,7 @@ grep "WS bid变化" data/bot1/guardian.log | wc -l
 ```bash
 # 1. 去 Polymarket 官网手动改某市场 bid
 # 2. 观察日志时间戳
-tail -f data/bot1/guardian.log | grep --line-buffered -E "WS bid变化|WS断线"
+tail -f /root/weather_lp/guardian_v8/data/bot1/guardian.log | grep --line-buffered -E "WS bid变化|WS断线"
 ```
 
 **预期**：bid 变化后 **1-2 秒内**触发撤单（不再是 30s）
@@ -368,7 +368,7 @@ systemctl disable guardian_v7.service
 
 **确认修复**：
 ```bash
-grep "孤儿订单" data/bot1/guardian.log | tail -10
+grep "孤儿订单" /root/weather_lp/guardian_v8/data/bot1/guardian.log | tail -10
 ```
 
 应看到 `孤儿订单撤销完成`，且不再反复出现同一 token。
@@ -417,10 +417,10 @@ screen -r bot1    # 恢复查看
 | **查看状态** | `screen -ls` |
 | **进入查看** | `screen -r bot1` |
 | **实时日志** | `tail -f /root/weather_lp/guardian_v8/data/bot1/guardian.log` |
-| **错误检查** | `grep -E "ERROR\|WARNING" data/bot1/guardian.log \| tail -50` |
-| **心跳状态** | `grep "HEARTBEAT" data/bot1/guardian.log \| tail -20` |
-| **WS 可用率** | `grep "WS STATS" data/bot1/guardian.log \| tail -10` |
-| **WS 撤单数** | `grep "WS bid变化" data/bot1/guardian.log \| wc -l` |
+| **错误检查** | `grep -E "ERROR\|WARNING" /root/weather_lp/guardian_v8/data/bot1/guardian.log \| tail -50` |
+| **心跳状态** | `grep "HEARTBEAT" /root/weather_lp/guardian_v8/data/bot1/guardian.log \| tail -20` |
+| **WS 可用率** | `grep "WS STATS" /root/weather_lp/guardian_v8/data/bot1/guardian.log \| tail -10` |
+| **WS 撤单数** | `grep "WS bid变化" /root/weather_lp/guardian_v8/data/bot1/guardian.log \| wc -l` |
 | **正常关闭** | `screen -r bot1` → `Ctrl+C` → 等关闭 → `exit` |
 | **强制关闭** | `screen -S bot1 -X quit` |
 | **更新代码** | 本地 `git push` → 服务器 `cd /root/weather_lp && git pull` |
