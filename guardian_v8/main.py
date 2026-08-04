@@ -2,8 +2,13 @@
 # -*- coding: utf-8 -*-
 """Guardian V8 入口
 
-切换账号：修改 INSTANCE 变量后重启。
-支持 bot1 / bot2 多实例，对应加载 .env.bot1 / .env.bot2。
+切换/指定账号（优先级：命令行参数 > 环境变量 INSTANCE > 默认 bot1）：
+  python main.py               → bot1（向后兼容）
+  python main.py bot2          → bot2
+  INSTANCE=bot2 python main.py → bot2
+每个实例读各自 .env.<instance>、写各自 data/<instance>/，无共享状态，可同时运行。
+安全约束：显式指定实例时，若 .env.<instance> 缺失则直接报错退出，绝不回退到裸
+.env —— 防止用错账户私钥挂单（串号）。
 """
 
 # ── HTTP/2 禁用补丁（必须在 polymarket SDK 导入之前执行）────────────────────
@@ -29,7 +34,20 @@ import sys
 #   python main.py bot2     → bot2
 #   INSTANCE=bot2 python main.py → bot2
 # 两个实例读不同 .env.<instance>、写不同 data/<instance>/，无共享状态可同时运行。
-INSTANCE = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("INSTANCE", "bot1"))
+# _explicit：实例是否由用户显式指定（命令行参数或环境变量）。显式指定时凭据文件
+# 缺失必须报错，不能回退 —— 见下方加载逻辑。
+import re as _re
+
+_arg_instance = sys.argv[1] if len(sys.argv) > 1 else None
+_env_instance = os.environ.get("INSTANCE")
+_explicit = bool(_arg_instance or _env_instance)
+INSTANCE = _arg_instance or _env_instance or "bot1"
+
+# 实例名格式校验：只允许字母/数字/下划线/连字符，杜绝路径穿越（如 ../../x）与空串。
+if not _re.fullmatch(r"[A-Za-z0-9_-]+", INSTANCE):
+    print(f"[FATAL] 非法实例名 {INSTANCE!r}：只允许字母、数字、下划线、连字符。",
+          file=sys.stderr)
+    sys.exit(2)
 
 # ── 加载环境变量（必须在导入 Config 之前）─────────────────────────────────────
 # 注意：Config 类字段中的 os.environ.get() 在类定义（import）时立即求值，
@@ -39,7 +57,14 @@ from dotenv import load_dotenv as _load_dotenv
 _env_file = f".env.{INSTANCE}"
 if _os.path.exists(_env_file):
     _load_dotenv(_env_file)
+elif _explicit:
+    # 用户显式指定了实例，但对应凭据文件不存在。绝不回退到裸 .env —— 否则可能用
+    # 错账户私钥挂单（串号）。宁可拒绝启动。
+    print(f"[FATAL] 指定实例 {INSTANCE!r} 但凭据文件 {_env_file} 不存在。"
+          f"请先创建它（勿依赖裸 .env 回退，以防用错账户）。", file=sys.stderr)
+    sys.exit(2)
 elif _os.path.exists(".env"):
+    # 仅当用户未显式指定实例（纯默认 bot1）时，才允许回退到裸 .env（保留旧行为）。
     _load_dotenv(".env")
 
 from config import load_config, Config
