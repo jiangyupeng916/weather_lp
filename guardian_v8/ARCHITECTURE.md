@@ -229,7 +229,7 @@ while running:
 
 **验证**：本地 `py_compile` + 12 例 pytest（scheduler 6 + background 6）全过。服务器上 screener 慢时 `[POLL]`/`[SELL-TRIGGER]`/`[LIMIT SELL]` 回写不再被拖延；`_pending_ops` 无跨线程写入。
 
-### 第二轮 —— WSS 实时 ✅ 已完成
+### 第二轮 —— WSS 实时 ⚠️ 待验证
 
 将 `wss/market_ws.py` 的市场频道 WSS **融入 `Guardian`**（A2 直接集成，不再维护 `GuardianWss` 分裂分支）。已删死代码：`wss/guardian_wss.py`（覆盖已改名的 `_poll_best_bids`，早已失效）、`wss/guard.py`、`wss/main.py`；`wss/__init__.py` 精简为只导出 `BidCache, MarketWS`（打破 `wss → guardian → wss` 循环导入）。
 
@@ -239,7 +239,19 @@ while running:
 
 **稳定性统计**：`_ws_disconnect_count` / `_ws_total_downtime` / `_ws_started_at` 主线程独占累计，`_log_ws_stats` 搭在 prune 任务里每 5min 输出 `[WS STATS] 断线N次 | 累计断线Xs | 运行Ys | 可用率Z%`，供 grep 判断是否需改用 B2（断线提速 REST）。
 
-**验证**：本地 `py_compile` + 31 例 pytest（scheduler 6 + background 6 + ws_market 19）全过；实盘市场频道 smoke test 已连通（订阅 30 市场、收到 30 条真实 bid 推送、BidCache 填满、25s 稳定、干净关闭）。
+**路由修复（2026-08-03，commit 31e4d12 + e6cb3ef）**：
+- **根因**：Polymarket WS 消息**无 `type` 字段**，所有消息走默认分支石沉大海 → WS 实时性失效（8 WS 撤单 vs 677 REST 撤单）
+- **修复**：`_route()` 改用结构推断：`isinstance(data, list)` → book 数组；`"price_changes" in data` → price_change 对象；`"bids" in data` → book 对象
+- **数据路径修正**：`_handle_price_change()` 从错误的 `payload.priceChanges[0].tokenId/bestBid` 改为正确的 `price_changes[0].asset_id/best_bid`（顶层，全小写+下划线）
+- **调试代码修复**：`_on_message()` 类型统计前增加 `isinstance(data, dict)` 检查，避免数组触发 `list.get()` AttributeError
+
+**待验证**（服务器重启后需确认）：
+1. 日志类型分布从全 `'unknown'` 变为 `{'array': N, 'unknown': M}`
+2. 大量 `WS bid变化` 日志出现（之前几乎没有）
+3. 官网手动改 bid 后 1-2s 内 bot 触发撤单（不再等 30s poll）
+4. WS:REST 撤单比例从 8:677 反转为主要由 WS 触发
+
+**验证**：本地 `py_compile` + 31 例 pytest（scheduler 6 + background 6 + ws_market 19）全过；实盘市场频道 smoke test 已连通（订阅 30 市场、收到 30 条真实 bid 推送、BidCache 填满、25s 稳定、干净关闭）。**路由修复后尚未实盘验证**。
 
 ---
 
