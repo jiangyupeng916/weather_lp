@@ -487,8 +487,9 @@ grep "孤儿订单" /root/weather_lp/guardian_v8/data/bot1/guardian.log | tail -
 ```bash
 cd /root/weather_lp/guardian_v8
 # 找"被 discover 接管过、但从未被移除"的孤儿 token
-grep "\[DISCOVER\] 新市场" data/bot1/guardian.log | grep -oE '[0-9]{18,}' | sort -u > /tmp/disc.txt
-grep "从筛选器移除"        data/bot1/guardian.log | grep -oE '[0-9]{18,}' | sort -u > /tmp/rm.txt
+# 注意：日志已按大小轮转（见第 12 节），用 guardian.log* 覆盖全部历史（含 .1 .2 ...）
+grep "\[DISCOVER\] 新市场" data/bot1/guardian.log* | grep -oE '[0-9]{18,}' | sort -u > /tmp/disc.txt
+grep "从筛选器移除"        data/bot1/guardian.log* | grep -oE '[0-9]{18,}' | sort -u > /tmp/rm.txt
 comm -23 /tmp/disc.txt /tmp/rm.txt    # 输出即孤儿候选，空=无孤儿
 ```
 
