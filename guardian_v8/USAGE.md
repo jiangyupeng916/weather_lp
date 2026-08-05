@@ -20,6 +20,7 @@
 9. [强制关闭（紧急）](#9-强制关闭紧急)
 10. [SSH 断线后恢复](#10-ssh-断线后恢复)
 11. [命令速查表](#11-命令速查表)
+12. [定时停用交易时段](#12-定时停用交易时段)
 
 ---
 
@@ -546,8 +547,63 @@ screen -r bot1    # 恢复查看
 | **WS 撤单数** | `grep "WS bid变化" /root/weather_lp/guardian_v8/data/bot1/guardian.log \| wc -l` |
 | **正常关闭** | `screen -r bot1` → `Ctrl+C` → 等关闭 → `exit` |
 | **强制关闭** | `screen -S bot1 -X quit` |
+| **定时停用（脚本）** | `./stop_bot.sh bot1`（优雅撤单停机） |
+| **定时重启（脚本）** | `./start_bot.sh bot1`（查重后启动） |
 | **更新代码** | 本地 `git push` → 服务器 `cd /root/weather_lp && git pull` |
 | **禁止V7自启** | `systemctl disable guardian_v7.service` |
+
+---
+
+## 12. 定时停用交易时段
+
+**场景**：某些时段（如北京时间每天 15:00-17:00 有大额交易扰动策略）不希望 bot 参与做市。
+
+**方案**：用 cron 定时**优雅停机 + 时段结束后重启**，交易代码零改动——复用已验证的优雅关闭路径（SIGTERM → `_shutdown()` 自动撤掉所有挂单）。停机期间 bot 完全离线，不挂新单、不被吃单。
+
+> 为什么不在代码里加时段门禁？外部停启零交易代码改动 = 零新 bug 风险，且撤单已由优雅关闭处理。每账户不同时段只需各自两行 cron。
+
+### 12.1 部署脚本
+
+仓库已提供 `stop_bot.sh` / `start_bot.sh`（随 `git pull` 到位）。首次赋予执行权限：
+
+```bash
+cd /root/weather_lp/guardian_v8
+chmod +x stop_bot.sh start_bot.sh
+```
+
+- `stop_bot.sh [实例]`：发 SIGTERM 优雅停机，等待撤单完成（最多 30s）。卡住不会 kill -9（防挂单未撤）。
+- `start_bot.sh [实例]`：内置查重（screen 会话 / 进程 / 凭据文件），防 cron 重复启动导致同账户双进程。
+
+### 12.2 手动验证（固化 cron 前先试一次）
+
+```bash
+./stop_bot.sh bot1
+grep "CANCEL ALL" data/bot1/guardian.log | tail -3    # 确认撤单跑完
+./start_bot.sh bot1
+screen -ls                                             # 确认重新起来
+```
+
+### 12.3 配置 cron（北京时间）
+
+服务器在境外，用 `CRON_TZ` 固定北京时间，无需换算服务器本地时区。`crontab -e`：
+
+```bash
+CRON_TZ=Asia/Shanghai
+# bot1：每天北京时间 15:00 优雅停机，17:00 重启
+0 15 * * * /root/weather_lp/guardian_v8/stop_bot.sh bot1 >> /root/weather_lp/guardian_v8/data/bot1/cron.log 2>&1
+0 17 * * * /root/weather_lp/guardian_v8/start_bot.sh bot1 >> /root/weather_lp/guardian_v8/data/bot1/cron.log 2>&1
+
+# bot2：不同账户可设不同时段（示例：20:00-22:00 停用）
+# 0 20 * * * /root/weather_lp/guardian_v8/stop_bot.sh bot2 >> /root/weather_lp/guardian_v8/data/bot2/cron.log 2>&1
+# 0 22 * * * /root/weather_lp/guardian_v8/start_bot.sh bot2 >> /root/weather_lp/guardian_v8/data/bot2/cron.log 2>&1
+```
+
+### 12.4 注意事项
+
+- **停机撤单需几秒**：SIGTERM 后要跑完当前 tick + 撤单，15:00→17:00 间隔 2 小时绰绰有余。
+- **停机期持仓无人管**：若停机前手里有持仓，期间不会挂卖单；17:00 重启后 `check_positions` 兜底补挂。
+- **查停启记录**：`cat data/bot1/cron.log`（每次停/启的时间戳与结果）。
+- **改时段**：直接改 crontab 的小时数，无需动代码或 `.env`。
 
 ---
 
