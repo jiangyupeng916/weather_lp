@@ -562,9 +562,26 @@ screen -r bot1    # 恢复查看
 
 > 为什么不在代码里加时段门禁？外部停启零交易代码改动 = 零新 bug 风险，且撤单已由优雅关闭处理。每账户不同时段只需各自两行 cron。
 
+### 12.0 先理解机制（重要，避免误解）
+
+**这套东西只需要配置一次，之后永久自动运行，你日常什么都不用做。**
+
+打个比方，它就是手机上一个**每天重复的闹钟**：
+
+- 你设一次闹钟（`crontab -e` 里写两行），以后每天自动响。
+- 下午 3 点的"闹钟"响 → 系统自动帮你**停机**（等于替你按 Ctrl+C）。
+- 下午 5 点的"闹钟"响 → 系统自动帮你**重启**。
+
+要点澄清（这几条最容易误解）：
+
+- **不用每天手动运行脚本**。是 cron（Linux 系统定时器）自动调用 `stop_bot.sh` / `start_bot.sh`，不是你。
+- **不用进 screen 会话**。停/启都靠进程名定位（`pgrep` 满系统找、`screen -dmS` 自己造会话），在哪个目录、是否在 screen 里都无所谓。只有你想**亲眼看实时日志**时才 `screen -r bot1`（看完 `Ctrl+A` 再按 `D` 退出）。
+- **平时正常启动 bot 不受影响**。你照常用 `./start_bot.sh bot1` 启动；cron 只在下午 3 点额外帮你停、5 点帮你启，其余时间不干预。
+- **配置一次后就别管了**。除非想改时段，才需要再动 crontab。
+
 ### 12.1 部署脚本
 
-仓库已提供 `stop_bot.sh` / `start_bot.sh`（随 `git pull` 到位）。首次赋予执行权限：
+仓库已提供 `stop_bot.sh` / `start_bot.sh`（随 `git pull` 到位）。首次赋予执行权限（**只做一次**）：
 
 ```bash
 cd /root/weather_lp/guardian_v8
@@ -576,16 +593,29 @@ chmod +x stop_bot.sh start_bot.sh
 
 ### 12.2 手动验证（固化 cron 前先试一次）
 
+先手动敲一遍，确认脚本能正常停、正常起。**站在最外面（SSH 登录进来的地方）直接敲即可，不用进 screen**：
+
 ```bash
+cd /root/weather_lp/guardian_v8
 ./stop_bot.sh bot1
 grep "CANCEL ALL" data/bot1/guardian.log | tail -3    # 确认撤单跑完
 ./start_bot.sh bot1
-screen -ls                                             # 确认重新起来
+screen -ls                                             # 确认重新起来（能看到 bot1 会话）
 ```
 
-### 12.3 配置 cron（北京时间）
+### 12.3 配置 cron（设置一次，永久自动）
 
-服务器在境外，用 `CRON_TZ` 固定北京时间，无需换算服务器本地时区。`crontab -e`：
+**cron 是 Linux 自带的定时任务系统。`crontab -e` 会打开一个文本编辑器，你把定时规则粘进去、保存退出，系统就会永久按这个时间表自动执行。**
+
+**第 1 步**：打开编辑器
+
+```bash
+crontab -e
+```
+
+> 首次执行可能让你选编辑器，输入 `1` 选 `nano`（最简单）后回车。
+
+**第 2 步**：把下面几行**粘贴进去**（服务器在境外，用 `CRON_TZ` 固定北京时间，无需换算时区）
 
 ```bash
 CRON_TZ=Asia/Shanghai
@@ -593,17 +623,31 @@ CRON_TZ=Asia/Shanghai
 0 15 * * * /root/weather_lp/guardian_v8/stop_bot.sh bot1 >> /root/weather_lp/guardian_v8/data/bot1/cron.log 2>&1
 0 17 * * * /root/weather_lp/guardian_v8/start_bot.sh bot1 >> /root/weather_lp/guardian_v8/data/bot1/cron.log 2>&1
 
-# bot2：不同账户可设不同时段（示例：20:00-22:00 停用）
+# bot2：不同账户可设不同时段（示例：20:00-22:00 停用）。去掉行首 # 即启用
 # 0 20 * * * /root/weather_lp/guardian_v8/stop_bot.sh bot2 >> /root/weather_lp/guardian_v8/data/bot2/cron.log 2>&1
 # 0 22 * * * /root/weather_lp/guardian_v8/start_bot.sh bot2 >> /root/weather_lp/guardian_v8/data/bot2/cron.log 2>&1
 ```
 
-### 12.4 注意事项
+**第 3 步**：保存退出
+
+- `nano` 编辑器：按 `Ctrl+O` 回车（保存），再按 `Ctrl+X`（退出）。
+- `vim` 编辑器：按 `Esc`，输入 `:wq` 回车。
+
+保存后终端会提示 `crontab: installing new crontab`，**表示已生效。至此全部完成，以后每天自动停/启，你无需再做任何操作。**
+
+**时间格式说明**：每行开头的 `0 15 * * *` 五个字段依次是 `分 时 日 月 星期`。`0 15` = 每天 15:00 整；`30 14` = 每天 14:30。改时段只改这两个数字即可。
+
+### 12.4 确认与日常维护
+
+```bash
+crontab -l                    # 查看已设置的定时任务（确认粘对了）
+cat data/bot1/cron.log        # 查看每次自动停/启的时间戳与结果
+```
 
 - **停机撤单需几秒**：SIGTERM 后要跑完当前 tick + 撤单，15:00→17:00 间隔 2 小时绰绰有余。
 - **停机期持仓无人管**：若停机前手里有持仓，期间不会挂卖单；17:00 重启后 `check_positions` 兜底补挂。
-- **查停启记录**：`cat data/bot1/cron.log`（每次停/启的时间戳与结果）。
-- **改时段**：直接改 crontab 的小时数，无需动代码或 `.env`。
+- **改时段**：`crontab -e` 改小时数即可，无需动代码或 `.env`。
+- **临时取消定时**：`crontab -e` 里在对应行首加 `#` 注释掉，或删掉那两行。
 
 ---
 
