@@ -1,9 +1,12 @@
 #!/bin/bash
 # 启动指定实例的 Guardian bot（在独立 screen 会话中后台运行）。
-# 用途：定时停用交易时段结束后（如北京时间 17:00）由 cron 调用重启。
+# 用途：定时停用交易时段结束后由 cron 调用重启。
 #
-# 内置查重：若同名 screen 会话已存在则跳过，防止 cron 重复启动导致同账户
-# 双进程（会引发订单冲突、重复撤单）。
+# 查重判据 = python 进程（唯一真相）：
+#   - python 真在跑 → 跳过（防同账户双进程：会引发订单冲突、重复撤单）。
+#   - python 没在跑但残留同名 screen 空壳会话 → 先清掉再启动
+#     （历史 bug：stop_bot 杀 python 后 screen 会话空转残留，
+#      旧版按“会话名存在”查重会误判“已在跑”而跳过重启）。
 #
 # 用法: ./start_bot.sh [实例名]   实例名默认 bot1
 set -u
@@ -12,16 +15,21 @@ INSTANCE="${1:-bot1}"
 WORKDIR="/root/weather_lp/guardian_v8"
 LOG_TAG="$(date '+%Y-%m-%d %H:%M:%S') [start_bot $INSTANCE]"
 
-# 查重 1：screen 会话是否已存在
-if screen -list 2>/dev/null | grep -q "\.${INSTANCE}[[:space:]]"; then
-    echo "$LOG_TAG screen 会话已存在，跳过启动"
+# 查重（唯一真相判据）：python 进程是否已在跑。
+# 精确匹配末尾 $，避免 bot1 匹配到 bot10。
+if pgrep -f "python main.py ${INSTANCE}\$" >/dev/null; then
+    echo "$LOG_TAG python 进程已在运行，跳过启动（防双开）"
     exit 0
 fi
 
-# 查重 2：进程是否已在跑（screen 之外的手动启动等）
-if pgrep -f "python main.py ${INSTANCE}\$" >/dev/null; then
-    echo "$LOG_TAG 进程已在运行，跳过启动"
-    exit 0
+# 到这里 = 没有 python 进程。若仍残留同名 screen 会话，即空壳，清掉再启动
+# （否则新旧同名会话并存，screen -r ${INSTANCE} 会因多个匹配而混乱）。
+if screen -list 2>/dev/null | grep -q "\.${INSTANCE}[[:space:]]"; then
+    echo "$LOG_TAG 检测到无 python 进程的残留空壳会话，清理中"
+    screen -ls 2>/dev/null | grep "\.${INSTANCE}[[:space:]]" | awk '{print $1}' | while read -r sid; do
+        screen -S "$sid" -X quit 2>/dev/null || true
+    done
+    screen -wipe >/dev/null 2>&1 || true
 fi
 
 # 凭据文件存在性检查（防串号：缺凭据不如不启动，与 main.py 严格策略一致）

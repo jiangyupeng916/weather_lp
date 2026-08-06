@@ -588,8 +588,8 @@ cd /root/weather_lp/guardian_v8
 chmod +x stop_bot.sh start_bot.sh
 ```
 
-- `stop_bot.sh [实例]`：发 SIGTERM 优雅停机，等待撤单完成（最多 30s）。卡住不会 kill -9（防挂单未撤）。
-- `start_bot.sh [实例]`：内置查重（screen 会话 / 进程 / 凭据文件），防 cron 重复启动导致同账户双进程。
+- `stop_bot.sh [实例]`：发 SIGTERM 优雅停机，等待撤单完成（最多 30s）。卡住不会 kill -9（防挂单未撤）。退出后主动关掉自己残留的空壳 screen 会话，保持 `screen -ls` 干净。
+- `start_bot.sh [实例]`：**查重以 python 进程为唯一真相**——python 真在跑才跳过（防同账户双进程）；若 python 没在跑但残留同名空壳会话，先清掉再启动（修复过历史 bug：旧版按“会话名存在”查重，stop 后残留的空壳会话会被误判成“还在跑”而拒绝重启）。附带凭据文件存在性检查。
 
 ### 12.2 手动验证（固化 cron 前先试一次）
 
@@ -615,18 +615,22 @@ crontab -e
 
 > 首次执行可能让你选编辑器，输入 `1` 选 `nano`（最简单）后回车。
 
-**第 2 步**：把下面几行**粘贴进去**（服务器在境外，用 `CRON_TZ` 固定北京时间，无需换算时区）
+**第 2 步**：把下面几行**粘贴进去**
+
+> ⚠️ **本服务器时区是 UTC，且实测 cron 会忽略 `CRON_TZ`。所以 crontab 里的小时数必须写 UTC 时间 = 北京时间 − 8。**
+> 北京 15:00 = **UTC 07:00**，北京 17:00 = **UTC 09:00**。（北京与 UTC 都无夏令时，固定 −8，一次换算永久有效。）
 
 ```bash
-CRON_TZ=Asia/Shanghai
-# bot1：每天北京时间 15:00 优雅停机，17:00 重启
-0 15 * * * /root/weather_lp/guardian_v8/stop_bot.sh bot1 >> /root/weather_lp/guardian_v8/data/bot1/cron.log 2>&1
-0 17 * * * /root/weather_lp/guardian_v8/start_bot.sh bot1 >> /root/weather_lp/guardian_v8/data/bot1/cron.log 2>&1
+# bot1：每天北京时间 15:00 优雅停机、17:00 重启（写成 UTC 07:00 / 09:00）
+0 7 * * * /root/weather_lp/guardian_v8/stop_bot.sh bot1 >> /root/weather_lp/guardian_v8/data/bot1/cron.log 2>&1
+0 9 * * * /root/weather_lp/guardian_v8/start_bot.sh bot1 >> /root/weather_lp/guardian_v8/data/bot1/cron.log 2>&1
 
-# bot2：不同账户可设不同时段（示例：20:00-22:00 停用）。去掉行首 # 即启用
-# 0 20 * * * /root/weather_lp/guardian_v8/stop_bot.sh bot2 >> /root/weather_lp/guardian_v8/data/bot2/cron.log 2>&1
-# 0 22 * * * /root/weather_lp/guardian_v8/start_bot.sh bot2 >> /root/weather_lp/guardian_v8/data/bot2/cron.log 2>&1
+# bot2：不同账户可设不同时段（示例：北京 20:00-22:00 停用 = UTC 12:00-14:00）。去掉行首 # 即启用
+# 0 12 * * * /root/weather_lp/guardian_v8/stop_bot.sh bot2 >> /root/weather_lp/guardian_v8/data/bot2/cron.log 2>&1
+# 0 14 * * * /root/weather_lp/guardian_v8/start_bot.sh bot2 >> /root/weather_lp/guardian_v8/data/bot2/cron.log 2>&1
 ```
+
+> 换算口诀：**北京时间 − 8 = crontab 里写的小时数**（不足则 +24，如北京 05:00 = 前一天 UTC 21:00）。cron.log 里的时间戳也是 UTC，看的时候 +8 即北京时间。
 
 **第 3 步**：保存退出
 

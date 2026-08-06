@@ -27,6 +27,12 @@ kill -TERM $PID
 for i in $(seq 1 30); do
     if ! kill -0 $PID 2>/dev/null; then
         echo "$LOG_TAG 进程已退出（优雅关闭完成），耗时 ${i}s"
+        # python 退出后 screen 会话常残留为空壳，主动关掉，避免误判“还在跑”
+        # 并让 screen -ls 保持干净（start_bot 也会兜底清理）。
+        screen -ls 2>/dev/null | grep "\.${INSTANCE}[[:space:]]" | awk '{print $1}' | while read -r sid; do
+            screen -S "$sid" -X quit 2>/dev/null || true
+        done
+        screen -wipe >/dev/null 2>&1 || true
         exit 0
     fi
     sleep 1
