@@ -46,7 +46,10 @@ class Config:
     )
 
     # ── Maker 挂单策略 ────────────────────────────────────────────────────────
-    maker_size: Decimal = Decimal("50")
+    # maker_size 可在各 .env.botN 单独设置 MAKER_SIZE，不同账号挂不同份额；不设默认 50。
+    maker_size: Decimal = field(
+        default_factory=lambda: Decimal(os.environ.get("MAKER_SIZE", "50"))
+    )
     maker_rank: int = 2
     maker_cooldown: float = 120.0
     tick_size: Decimal = Decimal("0.01")

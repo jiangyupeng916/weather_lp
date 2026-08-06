@@ -158,10 +158,15 @@ nano .env.bot2
 # CLOB_SECRET=...           # 账户2 API secret（可选）
 # CLOB_PASS_PHRASE=...      # 账户2 passphrase（可选）
 # HEARTBEAT_MAX_ERRORS=5
+# MAKER_SIZE=100            # 每单挂单量 USDC（可选，不设默认 50；每账号可设不同份额）
 # 筛选器参数可按账户2需求单独调整（如 SCREENER_MIN_SIZE_UPPER）
 
 chmod 600 .env.bot2
 ```
+
+> **每账号不同份额**：`maker_size`（每单挂单量）已支持在各 `.env.<instance>` 里用 `MAKER_SIZE` 单独设置。
+> 例如 bot1 设 `MAKER_SIZE=50`、bot2 设 `MAKER_SIZE=100`，两个进程各读各的 env 互不影响；不设则默认 50。
+> 只需填数字（如 `100`），填非数字会在启动时直接报错（fail-fast，防止用错值挂单）。
 
 **2) 验证账户2 SDK 连通性**
 
