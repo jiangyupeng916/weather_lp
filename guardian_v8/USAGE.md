@@ -496,6 +496,24 @@ comm -23 /tmp/disc.txt /tmp/rm.txt    # 输出即孤儿候选，空=无孤儿
 
 **确认修复**：重启后跑满一轮 screener（`grep "\[SCREENER\]"`），孤儿市场应出现 `从筛选器移除` 并被撤单；官网订单簿上不达标市场的挂单在 1-2 轮后消失。
 
+### 8.8 日志里 token 看起来"相同/错乱"（截断显示 + Excel 精度陷阱）
+
+**结论先行**：代码逻辑**全程用完整 token_id**（`_markets`、`_file_managed_ids`、`_selling`、`buys_by_token` 等 key 与集合运算都是完整 ID）。日志里的 `[:16]`/`[:20]`/`[:8]` **只是显示截断，不参与任何判断**，不会造成撞车/串单/孤儿。
+
+**两个真实陷阱**（都在代码之外）：
+
+1. **看日志时的错觉**：token_id 是超长数字，两个**完全不同**的 token 前 16-20 位可能相同，截断后在日志里长得一模一样。排查时务必用足够长的前缀区分，或参考下方"打完整 ID"的做法。
+
+2. **⚠️ 千万别用 Excel/WPS 打开 CSV**：token_id 是 uint256 超长数字（最长 77 位）。Excel 会把这列**自动转成科学计数法**（如 `6.56107E+19`），保存后精度永久丢失、后半段变 0，**不同 token 会真的变成同一个数字**。bot 自己读写 CSV 全程按字符串处理，是安全的；损坏只发生在你用 Excel 打开另存的那一刻。
+
+**正确查看 CSV（只在服务器上用文本方式）**：
+```bash
+cd /root/weather_lp/guardian_v8
+column -s, -t data/bot1/screener_latest.csv | less -S       # 表格对齐查看
+grep <完整token_id> data/bot1/screener_latest.csv           # 查具体 token 是否入选
+# 末两列 yes_token_id/no_token_id 为空 = 该方向未达标未被选
+```
+
 ---
 
 ## 9. 强制关闭（紧急）
