@@ -16,8 +16,8 @@ WORKDIR="/root/weather_lp/guardian_v8"
 LOG_TAG="$(date '+%Y-%m-%d %H:%M:%S') [start_bot $INSTANCE]"
 
 # 查重（唯一真相判据）：python 进程是否已在跑。
-# 精确匹配末尾 $，避免 bot1 匹配到 bot10。
-if pgrep -f "python main.py ${INSTANCE}\$" >/dev/null; then
+# 用本项目 venv 的完整路径做 pgrep，只匹配本项目的进程，不会误杀/误判其他项目。
+if pgrep -f "${WORKDIR}/venv/bin/python.*main.py ${INSTANCE}\$" >/dev/null; then
     echo "$LOG_TAG python 进程已在运行，跳过启动（防双开）"
     exit 0
 fi
@@ -39,5 +39,6 @@ if [ ! -f "${WORKDIR}/.env.${INSTANCE}" ]; then
 fi
 
 cd "$WORKDIR" || { echo "$LOG_TAG ⚠️ 无法进入 $WORKDIR"; exit 1; }
-screen -dmS "$INSTANCE" bash -c "source venv/bin/activate && python main.py ${INSTANCE}"
+# 用 venv 完整路径启动，进程命令行里会带本项目路径前缀，pgrep 才能精准匹配
+screen -dmS "$INSTANCE" bash -c "${WORKDIR}/venv/bin/python ${WORKDIR}/main.py ${INSTANCE}"
 echo "$LOG_TAG 已在 screen 会话 '$INSTANCE' 中启动"

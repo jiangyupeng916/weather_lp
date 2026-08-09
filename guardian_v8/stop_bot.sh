@@ -10,10 +10,12 @@
 set -u
 
 INSTANCE="${1:-bot1}"
+WORKDIR="/root/weather_lp/guardian_v8"
 LOG_TAG="$(date '+%Y-%m-%d %H:%M:%S') [stop_bot $INSTANCE]"
 
-# 精确匹配 "python main.py <instance>"，避免误杀其他实例（bot1 不匹配 bot10）
-PID="$(pgrep -f "python main.py ${INSTANCE}\$" || true)"
+# 用本项目 venv 的完整路径做 pgrep，只杀本项目的进程，不会误杀其他项目。
+# （两个项目都用 bot1 实例名时，pgrep "python main.py bot1" 会两个都匹配）
+PID="$(pgrep -f "${WORKDIR}/venv/bin/python.*main.py ${INSTANCE}\$" || true)"
 
 if [ -z "$PID" ]; then
     echo "$LOG_TAG 未找到运行中的进程，跳过"
