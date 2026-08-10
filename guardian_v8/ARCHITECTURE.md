@@ -477,7 +477,9 @@ Guardian 是 **纯 Maker（挂单方）** 做市机器人，运行在 Polymarket
 #### 6.2.2 挂单量与价格对齐
 
 - 每单固定 `maker_size=50`（50 USDC 等值）
-- 下单前价格 `round_to_tick` 对齐到 `tick_size`（0.01）的倍数
+- 挂订单簿实际第 `maker_rank` 档价（V8.3 起**不再 round**——订单簿价格本身即该市场合法
+  tick 倍数；各市场 tick 各异 `0.1/0.01/0.005/0.0025/0.001/0.0001`，硬编码 0.01 会把
+  档位错误吸附，如 0.952→0.95、0.933→0.93）
 
 #### 6.2.3 Post-Only 保护
 
@@ -624,7 +626,7 @@ best_bid（第 1 档买价）变化时：
 | `maker_size` | 50 | 每单挂单量（USDC） |
 | `maker_rank` | 2 | 挂买盘第几档（买二档） |
 | `maker_cooldown` | 120s | 撤单后冷却时间 |
-| `tick_size` | 0.01 | 价格最小变动单位 |
+| `tick_size` | 0.01 | 保留字段（V8.3 起不再用于价格 round；市场 tick 各异，订单簿档位价即合法价） |
 | `heartbeat_interval` | 7s | 心跳间隔 |
 | `best_bid_poll_interval` | 3s | REST 轮询间隔（WSS 启用后变 30s） |
 | `audit_interval` | 120s | 审计周期 |

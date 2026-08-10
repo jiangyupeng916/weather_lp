@@ -394,7 +394,7 @@ sudo systemctl enable --now polymarket-bot2
 | `无行情数据超过 5s` 频繁出现 | 网络不稳定 | 检查服务器到 Polymarket 的延迟；考虑增大 `NO_DATA_TIMEOUT` |
 | `获取市场失败` 反复出现 | Gamma API 限流或网络问题 | 检查是否有其他程序也在高频调用；稍等自动恢复 |
 | `下单被拒 code=... minimum_order_size` | notional 低于 5 | 调大 `config.py` 的 `ORDER_SIZE` 到 6 |
-| `下单被拒 code=... invalid_price` | 价格未对齐 tick_size | 检查 tick_size 是否正确读取（日志中有打印） |
+| `下单被拒 code=... invalid_price` | 价格未对齐市场 tick | V8.3 起直接挂订单簿档位价（本身即合法 tick 倍数），正常不应出现；若出现查日志中挂单价格来源 |
 
 ### 8.3 日志中没有触发记录
 
