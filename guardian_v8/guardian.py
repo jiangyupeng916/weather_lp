@@ -229,8 +229,10 @@ class Guardian:
         bids = self.get_order_book_bids(token_id)
         if len(bids) < self.cfg.maker_rank:
             return None
-        raw = bids[self.cfg.maker_rank - 1]
-        return round_to_tick(raw, self.cfg.tick_size)
+        # V8.3: 直接挂订单簿实际档位价，不做 round_to_tick。
+        # 订单簿价格本身就是该市场合法 tick 的倍数；硬编码 0.01 round 会把
+        # 0.001-tick 市场的档位错误吸附（如 0.933 → 0.93），并冻结成非实际档位价。
+        return bids[self.cfg.maker_rank - 1]
 
     # ── 冷却 ──────────────────────────────────────────────────────────────────
     def _start_cooldown(self, ms: MarketState, duration: float):

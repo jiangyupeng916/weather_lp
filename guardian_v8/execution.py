@@ -164,7 +164,9 @@ class ExecutionLayer:
         """异步下单，返回 Future[Optional[str]]（order_id 或 None）。"""
         fut: Future = Future()
 
-        aligned = round_to_tick(price, tick_size)
+        # V8.3: 不再 round——调用方传入的价格已来自订单簿实际档位（市场合法 tick 倍数）。
+        # 硬编码 tick 会让 0.001-tick 市场被吸附到 0.01 档（如 0.933→0.93）。
+        aligned = price
 
         token = f"place:{asset_id}:{aligned}"
         with self._lock_place:
