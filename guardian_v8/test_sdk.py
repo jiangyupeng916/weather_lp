@@ -22,11 +22,12 @@ else:
     print(f"[✗] 找不到 {env_file}")
     sys.exit(1)
 
-pk         = os.environ.get("PK", "")
-wallet     = os.environ.get("WALLET_ADDRESS", "")
+# 与 config.py 的命名优先级保持一致：官方命名优先，旧短名 fallback
+pk         = os.environ.get("SIGNER_PRIVATE_KEY") or os.environ.get("PK", "")
+wallet     = os.environ.get("POLYMARKET_WALLET_ADDRESS") or os.environ.get("WALLET_ADDRESS", "")
 proxy      = os.environ.get("PROXY_ADDRESS", "")
-relay_key  = os.environ.get("RELAYER_API_KEY", "")
-relay_addr = os.environ.get("RELAYER_API_KEY_ADDRESS", "")
+relay_key  = os.environ.get("POLYMARKET_RELAYER_API_KEY") or os.environ.get("RELAYER_API_KEY", "")
+relay_addr = os.environ.get("POLYMARKET_RELAYER_API_KEY_ADDRESS") or os.environ.get("RELAYER_API_KEY_ADDRESS", "")
 
 if not pk:
     print("[✗] PK 环境变量未设置")

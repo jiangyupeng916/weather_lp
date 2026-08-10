@@ -158,8 +158,24 @@ class Config:
     def validate(self) -> None:
         """V8.2：只要求 pk；wallet/relayer/proxy 按账户格式可选。"""
         if not self.pk:
-            raise EnvironmentError("缺少环境变量: pk（私钥）")
+            raise EnvironmentError("缺少环境变量: SIGNER_PRIVATE_KEY / PK（私钥）")
+        # 防串号：新旧命名同时存在且内容不同时，不静默选一个，直接报错。
+        _sig = os.environ.get("SIGNER_PRIVATE_KEY")
+        _old_pk = os.environ.get("PK")
+        if _sig and _old_pk and _sig.strip() != _old_pk.strip():
+            raise EnvironmentError(
+                "检测到 SIGNER_PRIVATE_KEY 与 PK 同时设置且内容不同（疑似串号）："
+                "请只保留一套命名"
+            )
+        # 新账户：显式给了账户钱包地址就必须 relayer 四件套齐全，
+        # 否则 bot 能启动但首次 gasless 下单才失败（DEPLOY.md 已声明"四字段齐全"）。
+        if self.wallet and not (self.relayer_api_key and self.relayer_api_key_address):
+            raise EnvironmentError(
+                "设置了账户钱包地址（POLYMARKET_WALLET_ADDRESS）但缺少 Relayer API Key 配对："
+                "新账户需 RELAYER_API_KEY + RELAYER_API_KEY_ADDRESS 两个都要有"
+            )
         if self.relayer_api_key and not self.relayer_api_key_address:
             raise EnvironmentError(
-                "设置了 RELAYER_API_KEY 但缺少 RELAYER_API_KEY_ADDRESS（新账户需两者配对）"
+                "设置了 RELAYER_API_KEY（POLYMARKET_RELAYER_API_KEY）但缺少 "
+                "RELAYER_API_KEY_ADDRESS（POLYMARKET_RELAYER_API_KEY_ADDRESS）：新账户需两者配对"
             )
