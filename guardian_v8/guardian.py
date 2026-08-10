@@ -25,7 +25,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
-from polymarket import SecureClient
+from polymarket import RelayerApiKey, SecureClient
 
 from config import Config
 from models import ActorState, MarketState, OrderInfo
@@ -58,13 +58,22 @@ class Guardian:
         self.cfg = cfg or Config()
         self.running = True
 
-        # ── 初始化 CLOB 客户端（V8：SecureClient.create，自动处理 Proxy Wallet） ──
-        # wallet 参数：存在 proxy 地址时传入（signatureType=1 旧账户），否则传 None
+        # ── 初始化 CLOB 客户端（V8.2：SecureClient.create，支持新旧两种账户） ──
+        # 新账户（Deposit Wallet）: WALLET_ADDRESS + RELAYER_API_KEY/ADDRESS（gasless）
+        # 旧账户（POLY_PROXY）    : PROXY_ADDRESS（无 relayer）
+        # wallet 优先级：WALLET_ADDRESS > PROXY_ADDRESS > None（SDK 解析到 signer 的 Deposit Wallet）
+        api_key = None
+        if self.cfg.relayer_api_key and self.cfg.relayer_api_key_address:
+            api_key = RelayerApiKey(
+                key=self.cfg.relayer_api_key,
+                address=self.cfg.relayer_api_key_address,
+            )
         self.client = SecureClient.create(
             private_key=self.cfg.pk,
-            wallet=self.cfg.proxy or None,
+            wallet=self.cfg.wallet or self.cfg.proxy or None,
+            api_key=api_key,
         )
-        # wallet 属性：SDK 解析后的实际链上地址（Proxy Wallet 或 EOA）
+        # wallet 属性：SDK 解析后的实际链上地址（Deposit Wallet / Proxy Wallet / EOA）
         self.address = self.client.wallet
 
         # ── 组件初始化（按依赖顺序） ───────────────────────────────────────────

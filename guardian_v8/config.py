@@ -29,12 +29,35 @@ class Config:
     ws_user: str = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
     data_api: str = "https://data-api.polymarket.com"
 
-    # ── 账户（V8：只需 pk，proxy 可选） ──────────────────────────────────────
+    # ── 账户 ──────────────────────────────────────────────────────────────────
+    # V8.2：支持两种账户格式 ——
+    #  新账户（Deposit Wallet，2026-05-04 后标准账户）: PK + WALLET_ADDRESS + RELAYER_API_KEY + RELAYER_API_KEY_ADDRESS
+    #  旧账户（POLY_PROXY，Magic/Google 登录旧账户）:      PK + PROXY_ADDRESS（无 relayer）
+    # wallet 优先级：WALLET_ADDRESS > PROXY_ADDRESS > None（SDK 解析到 signer 的 Deposit Wallet）
     chain_id: int = int(os.environ.get("CHAIN_ID", "137"))
-    pk: str = field(default_factory=lambda: os.environ.get("PK", ""))
+    # 私钥：官方命名 SIGNER_PRIVATE_KEY 优先，兼容旧短名 PK
+    pk: str = field(default_factory=lambda: (
+        os.environ.get("SIGNER_PRIVATE_KEY") or os.environ.get("PK", "")
+    ))
+    # 账户钱包地址（新账户必须）：POLYMARKET_WALLET_ADDRESS 优先，兼容 WALLET_ADDRESS
+    wallet: str = field(default_factory=lambda: (
+        os.environ.get("POLYMARKET_WALLET_ADDRESS") or os.environ.get("WALLET_ADDRESS", "")
+    ))
+    # 旧账户（POLY_PROXY）代理地址：仅旧格式使用
     proxy: str = field(default_factory=lambda: os.environ.get("PROXY_ADDRESS", ""))
 
-    # ── API 凭据（V8：可选，仅用于心跳 raw 回退） ────────────────────────────
+    # ── Relayer API Key（新账户 gasless 钱包操作授权，两者都设才生效） ──────
+    # 官方命名 POLYMARKET_RELAYER_API_KEY* 优先，兼容短名 RELAYER_API_KEY*
+    relayer_api_key: Optional[str] = field(default_factory=lambda: (
+        os.environ.get("POLYMARKET_RELAYER_API_KEY") or os.environ.get("RELAYER_API_KEY") or None
+    ))
+    relayer_api_key_address: Optional[str] = field(default_factory=lambda: (
+        os.environ.get("POLYMARKET_RELAYER_API_KEY_ADDRESS")
+        or os.environ.get("RELAYER_API_KEY_ADDRESS") or None
+    ))
+
+    # ── API 凭据（历史遗留，无代码使用；SDK 自动派生 L2 凭据，用 client.credentials） ──
+    # 保留仅为向后兼容（旧 .env 仍可能带这些变量），实际心跳/下单都走 client.credentials。
     api_key: Optional[str] = field(
         default_factory=lambda: os.environ.get("CLOB_API_KEY") or None
     )
@@ -133,6 +156,10 @@ class Config:
     )
 
     def validate(self) -> None:
-        """V8：只要求 pk；api 凭据可选（仅心跳 raw 回退使用）。"""
+        """V8.2：只要求 pk；wallet/relayer/proxy 按账户格式可选。"""
         if not self.pk:
             raise EnvironmentError("缺少环境变量: pk（私钥）")
+        if self.relayer_api_key and not self.relayer_api_key_address:
+            raise EnvironmentError(
+                "设置了 RELAYER_API_KEY 但缺少 RELAYER_API_KEY_ADDRESS（新账户需两者配对）"
+            )

@@ -22,23 +22,30 @@ else:
     print(f"[✗] 找不到 {env_file}")
     sys.exit(1)
 
-pk      = os.environ.get("PK", "")
-proxy   = os.environ.get("PROXY_ADDRESS", "")
-api_key = os.environ.get("CLOB_API_KEY", "")
+pk         = os.environ.get("PK", "")
+wallet     = os.environ.get("WALLET_ADDRESS", "")
+proxy      = os.environ.get("PROXY_ADDRESS", "")
+relay_key  = os.environ.get("RELAYER_API_KEY", "")
+relay_addr = os.environ.get("RELAYER_API_KEY_ADDRESS", "")
 
 if not pk:
     print("[✗] PK 环境变量未设置")
     sys.exit(1)
 
-print(f"[i] 实例={instance}  proxy={'(设置)' if proxy else '(未设置，使用 EOA)'}  api_key={'(设置)' if api_key else '(未设置)'}")
+print(f"[i] 实例={instance}  wallet={wallet or proxy or '(未设→SDK默认)'}  relayer={'(设置)' if (relay_key and relay_addr) else '(未设置)'}")
 
 # ── 初始化 SecureClient ────────────────────────────────────────────────────────
 print("\n── Step 1: 初始化 SecureClient ────────────────────────────────")
-from polymarket import SecureClient
+from polymarket import RelayerApiKey, SecureClient
+
+api_key = None
+if relay_key and relay_addr:
+    api_key = RelayerApiKey(key=relay_key, address=relay_addr)
 
 client = SecureClient.create(
     private_key=pk,
-    wallet=proxy or None,
+    wallet=wallet or proxy or None,
+    api_key=api_key,
 )
 address = client.wallet
 print(f"[✓] client.wallet = {address}")

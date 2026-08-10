@@ -65,6 +65,11 @@ cat ~/polymarket-short-bot/.env.bot1
 #   POLYMARKET_RELAYER_API_KEY_ADDRESS=...
 ```
 
+> **新旧账户兼容**：上面是 2026-05-04 后新账户（Deposit Wallet）格式。若沿用旧
+> Proxy 账户（Magic/Google 登录），改用 `PK` + `PROXY_ADDRESS` 两行即可，代码自动
+> 兼容（官方命名优先，旧短名 fallback）。新账户必须四字段齐全，Relayer Key 用于
+> gasless 钱包操作；旧账户无需 Relayer Key。
+
 ### 2.4 调整配置（部署前必读）
 
 编辑 `config.py`，确认以下参数符合你的策略：
