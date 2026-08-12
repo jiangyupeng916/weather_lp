@@ -123,6 +123,9 @@ class Guardian:
         self.trade_logger = _file_logger("trades", self.cfg.instance_name)
         self._sell_lock = threading.Lock()
         self._selling: Set[str] = set()
+        # 持仓首见时间戳 {token_id: 首次在 check_positions 看到的 time.time()}，
+        # 用于 max_hold_hours 超时强平计时。主线程独占（仅 check_positions 读写）。
+        self._holding_since: Dict[str, float] = {}
         self._pending_sell_tokens: Dict[str, Decimal] = {}  # BUY 成交后待触发卖单 {token_id: fill_price}
         self._pending_sell_lock = threading.Lock()
         self._processed_trades: Dict[str, float] = {}
@@ -149,6 +152,9 @@ class Guardian:
         logger.info("实例: %s | midpoint=[%.2f, %.2f]",
                     self.cfg.instance_name,
                     self.cfg.screener_min_midpoint, self.cfg.screener_max_midpoint)
+        logger.info("超时强平: %s | max_hold=%.1fh",
+                    "启用" if self.cfg.max_hold_enabled else "关闭",
+                    self.cfg.max_hold_hours)
         logger.info("=" * 60)
 
     # ── 信号处理 ──────────────────────────────────────────────────────────────
@@ -493,6 +499,16 @@ class Guardian:
                 else:
                     logger.error("[%s] %s 卖单失败 price=%s",
                                  tag, token_id[:16], meta.get("price"))
+                continue
+
+            # 超时强平市价单结果（FOK）：成功即清仓；失败下一轮 position 周期重试。
+            if op == "market_sell":
+                if result:
+                    logger.warning("[MAX-HOLD] %s FOK 市价卖成功 id=%s shares=%s",
+                                   token_id[:16], str(result)[:20], meta.get("shares"))
+                else:
+                    logger.error("[MAX-HOLD] %s FOK 市价卖失败（流动性不足?），下轮重试 shares=%s",
+                                 token_id[:16], meta.get("shares"))
                 continue
 
             ms = self._markets.get(token_id)
@@ -1270,8 +1286,29 @@ class Guardian:
     # ── 持仓兜底 ──────────────────────────────────────────────────────────────
     def check_positions(self):
         pos_list = self.positions()
+
+        # ── 持仓首见计时维护（V8.4 超时强平）──────────────────────────────────
+        # 每轮同步 _holding_since：新持仓记当前时间，已消失（卖光）的清理。
+        # 仅主线程 check_positions 读写，无锁。空持仓也要清理，故在 early-return 前做。
+        now_ts = time.time()
+        current_tids = {p.get("asset", "") for p in pos_list if p.get("asset")}
+        for tid in current_tids:
+            if tid not in self._holding_since:
+                self._holding_since[tid] = now_ts
+        for tid in list(self._holding_since.keys()):
+            if tid not in current_tids:
+                del self._holding_since[tid]
+
         if not pos_list:
             return
+
+        # 超时集合：持有超过 max_hold_hours 的 token（到期无条件 FOK 市价全卖）
+        overdue: Set[str] = set()
+        if self.cfg.max_hold_enabled:
+            max_age = self.cfg.max_hold_hours * 3600.0
+            for tid in current_tids:
+                if now_ts - self._holding_since.get(tid, now_ts) >= max_age:
+                    overdue.add(tid)
 
         # 批量查询所有持仓的 best_ask（maker 卖单挂在 best_ask，省 taker 费 + 赚价差）
         # 注：/books 的 asks 数组降序排列，asks[-1] 为最低卖价 = best_ask
@@ -1304,6 +1341,34 @@ class Guardian:
         for p in pos_list:
             tid = p.get("asset", "")
             if not tid:
+                continue
+
+            # ── 超时强平：持有 >= max_hold_hours → FOK 市价全卖，忽略崩盘保护 ──
+            # 放在 best_ask/崩盘保护逻辑之前：超时逃生优先于任何价格保护。
+            # FOK 失败（流动性不足）不做特殊处理，下一轮 position 周期(120s)自然重试。
+            if tid in overdue:
+                with self._sell_lock:
+                    if tid in self._selling:
+                        continue
+                    self._selling.add(tid)
+                try:
+                    bal = self.onchain_balance(tid)
+                    if bal <= self.cfg.position_threshold:
+                        continue
+                    age_h = (now_ts - self._holding_since.get(tid, now_ts)) / 3600.0
+                    # 已有卖单先撤，避免占用余额导致市价单余额不足
+                    existing = sell_map.get(tid)
+                    if existing:
+                        self.exec_layer.cancel(existing[0], "超时强平撤旧卖单")
+                    logger.warning(
+                        "[MAX-HOLD] %s 持有 %.2fh >= %.1fh，FOK 市价全卖 %.4f shares",
+                        p.get("title", "未知")[:40], age_h, self.cfg.max_hold_hours, bal)
+                    fut = self.exec_layer.market_sell(tid, bal, self.cfg.tick_size)
+                    self._enqueue_pending_op((fut, tid, "market_sell", {"shares": bal}))
+                    placed += 1
+                finally:
+                    with self._sell_lock:
+                        self._selling.discard(tid)
                 continue
 
             ba = best_ask_map.get(tid)

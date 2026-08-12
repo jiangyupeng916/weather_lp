@@ -119,6 +119,17 @@ class Config:
     position_threshold: float = 1.0
     sell_min_bid_gap: Decimal = Decimal("0.02")  # best_bid 低于成本价-此值则跳过卖出
 
+    # ── 持仓超时强平（V8.4）─────────────────────────────────────────────────
+    # 持仓自 bot 首次看到起超过 max_hold_hours 仍未卖出 → 无条件 FOK 市价全卖，
+    # 忽略 sell_min_bid_gap 崩盘保护（止损逃生优先）。kill switch：置 false 关闭。
+    max_hold_enabled: bool = field(
+        default_factory=lambda: os.environ.get("MAX_HOLD_ENABLED", "true").lower()
+        not in ("false", "0", "no", "off")
+    )
+    max_hold_hours: float = field(
+        default_factory=lambda: float(os.environ.get("MAX_HOLD_HOURS", "4"))
+    )
+
     # ── WebSocket 连接 ────────────────────────────────────────────────────────
     ws_reconnect_delay: float = 5.0
     user_ping_interval: float = 50.0
