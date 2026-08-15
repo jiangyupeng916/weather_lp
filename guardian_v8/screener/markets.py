@@ -66,17 +66,19 @@ def fetch_and_filter(cfg) -> list[CandidateMarket]:
             continue
 
         end_date_str = m.get("end_date_iso", "")
-        if not end_date_str:
-            continue
-
-        end_date = datetime.fromisoformat(
-            end_date_str.replace("Z", "+00:00")
-        )
-        days_to_expiry = (end_date.timestamp() * 1000 - now) / (
-            1000 * 60 * 60 * 24
-        )
-        if days_to_expiry < cfg.screener_min_days_to_expiry:
-            continue
+        if end_date_str:
+            end_date = datetime.fromisoformat(
+                end_date_str.replace("Z", "+00:00")
+            )
+            days_to_expiry = (end_date.timestamp() * 1000 - now) / (
+                1000 * 60 * 60 * 24
+            )
+            if days_to_expiry < cfg.screener_min_days_to_expiry:
+                continue
+        else:
+            # 无 end_date 的长期/赛季型市场：不按到期过滤，视为长期有效
+            end_date = None
+            days_to_expiry = float("inf")
 
         min_size = rewards.get("min_size", 0)
         if min_size < cfg.screener_min_size_lower or min_size > cfg.screener_min_size_upper:

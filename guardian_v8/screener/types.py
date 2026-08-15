@@ -1,12 +1,13 @@
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Optional
 
 
 @dataclass
 class CandidateMarket:
     condition_id: str
     question: str
-    end_date: datetime
+    end_date: Optional[datetime]   # 无 end_date 的长期/赛季型市场为 None
     days_to_expiry: float
     yes_token_id: str
     no_token_id: str
