@@ -98,6 +98,15 @@ class Config:
     # ── 内置筛选器 ────────────────────────────────────────────────────────
     screener_interval: float = float(os.environ.get("SCREENER_INTERVAL", "30"))
     screener_keyword: str = os.environ.get("SCREENER_KEYWORD", "temp")
+    # 标签筛选：逗号分隔的 label 列表，命中任一（OR）即保留；空=不过滤。
+    # 大小写不敏感（sampling-markets 的 tags 与 gamma /tags 的 label 大小写不一致）。
+    screener_tags: tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            t.strip().lower()
+            for t in os.environ.get("SCREENER_TAGS", "").split(",")
+            if t.strip()
+        )
+    )
     screener_min_daily_rewards: float = float(os.environ.get("SCREENER_MIN_DAILY_REWARDS", "10.0"))
     screener_min_days_to_expiry: int = int(os.environ.get("SCREENER_MIN_DAYS_TO_EXPIRY", "0"))
     screener_min_midpoint: float = float(os.environ.get("SCREENER_MIN_MIDPOINT", "0.15"))

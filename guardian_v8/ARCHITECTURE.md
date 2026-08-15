@@ -636,6 +636,7 @@ best_bid（第 1 档买价）变化时：
 
 **筛选器参数**（`SCREENER_*`，`.env` 可覆盖）：
 - `keyword=temp`（天气类市场参与者少、竞争低）
+- `tags=`（逗号分隔的标签 label 列表，命中任一即保留，OR 语义，大小写不敏感；空=不过滤）
 - `min_daily_rewards=10`
 - `min_existing_size=2000`
 - `top1/2/3=100/400/1200`
