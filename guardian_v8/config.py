@@ -100,11 +100,12 @@ class Config:
     screener_keyword: str = os.environ.get("SCREENER_KEYWORD", "temp")
     # 标签筛选：逗号分隔的 label 列表，命中任一（OR）即保留；空=不过滤。
     # 大小写不敏感（sampling-markets 的 tags 与 gamma /tags 的 label 大小写不一致）。
+    # 防御：过滤掉以 # 开头的项（python-dotenv 会把「SCREENER_TAGS=  # 注释」的行内注释解析进值）。
     screener_tags: tuple[str, ...] = field(
         default_factory=lambda: tuple(
             t.strip().lower()
             for t in os.environ.get("SCREENER_TAGS", "").split(",")
-            if t.strip()
+            if t.strip() and not t.strip().startswith("#")
         )
     )
     screener_min_daily_rewards: float = float(os.environ.get("SCREENER_MIN_DAILY_REWARDS", "10.0"))
