@@ -256,14 +256,17 @@ class MarketWS:
             self._ws = ws
         self._last_pong = time.time()  # 重置 pong 计时
 
-        # 订阅所有当前市场
+        # 订阅所有当前市场。即使为空也发空订阅，让服务器进入「已订阅」状态——
+        # 否则未订阅状态下发 PING 会被服务器误判为 invalid subscription payload 并关闭连接
+        # （Polymarket 2026-08 服务端行为变化，空订阅实测被接受且 PING 恢复正常）。
         with self._subscribed_ids_lock:
             ids = list(self._subscribed_ids)
         if ids:
             ws.send(json.dumps({"assets_ids": ids, "type": "market"}))
             logger.info("[MarketWS] 已连接，订阅 %d 个市场", len(ids))
         else:
-            logger.info("[MarketWS] 已连接（暂无市场，等待动态订阅）")
+            ws.send(json.dumps({"assets_ids": [], "type": "market"}))
+            logger.info("[MarketWS] 已连接（暂无市场，发空订阅占位）")
 
         # 启动本连接的文本 PING 线程
         threading.Thread(
