@@ -48,7 +48,9 @@ def _fetch_all_orderbooks(candidates: list[CandidateMarket], cfg) -> dict[str, d
     batches = [token_ids[i:i + BATCH_SIZE] for i in range(0, len(token_ids), BATCH_SIZE)]
     all_books: dict[str, dict] = {}
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    # /books 限流 500 req/10s（官方文档），19 批并发远低于上限，可安全提高并发。
+    # 候选多时（如 Midterms 标签 4755 候选 = 19 批）串行排队是耗时主因，提并发加速。
+    with ThreadPoolExecutor(max_workers=20) as executor:
         futures = {executor.submit(_fetch_orderbooks_batch, b, cfg): b for b in batches}
         for future in as_completed(futures):
             batch_books = future.result()
