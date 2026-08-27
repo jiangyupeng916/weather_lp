@@ -14,6 +14,10 @@ class CandidateMarket:
     total_daily_rewards: float
     min_size: float
     max_spread: float
+    # 成交量 / 流动性（gamma 补查，默认 0 = 未查到）
+    volume: float = 0.0          # volumeNum 累计成交量
+    volume24hr: float = 0.0      # volume24hr 近 24h 成交量
+    liquidity: float = 0.0       # liquidityNum 当前总流动性
 
 
 @dataclass

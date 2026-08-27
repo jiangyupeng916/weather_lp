@@ -8,10 +8,12 @@
 from screener.types import CandidateMarket, ScoredMarket, AllocatedMarket
 from screener.markets import fetch_and_filter
 from screener.clob import analyze_orderbooks
+from screener.gamma import enrich_and_filter
 
 __all__ = [
     "fetch_and_filter",
     "analyze_orderbooks",
+    "enrich_and_filter",
     "CandidateMarket",
     "ScoredMarket",
     "AllocatedMarket",

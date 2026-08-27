@@ -28,6 +28,7 @@ class Config:
     host: str = os.environ.get("CLOB_API_URL", "https://clob.polymarket.com")
     ws_user: str = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
     data_api: str = "https://data-api.polymarket.com"
+    gamma_api: str = os.environ.get("GAMMA_API_URL", "https://gamma-api.polymarket.com")
 
     # ── 账户 ──────────────────────────────────────────────────────────────────
     # V8.2：支持两种账户格式 ——
@@ -118,6 +119,12 @@ class Config:
     screener_min_top1_bids: float = float(os.environ.get("SCREENER_MIN_TOP1_BIDS", "100.0"))
     screener_min_top2_bids: float = float(os.environ.get("SCREENER_MIN_TOP2_BIDS", "400.0"))
     screener_min_top3_bids: float = float(os.environ.get("SCREENER_MIN_TOP3_BIDS", "1200.0"))
+    # 成交量 / 流动性上限（gamma 补查，双接口方案）：
+    # sampling-markets 只给 rewards 不给 volume/liquidity，需用 condition_id 去
+    # gamma /markets 补查后按上限过滤，排除成交量/流动性过高（已饱和、LP 收益被稀释）
+    # 的市场。默认 inf = 不过滤（等同未加此功能）；≤0 会滤掉所有市场，慎设。
+    screener_max_volume_24h: float = float(os.environ.get("SCREENER_MAX_VOLUME_24H", "inf"))
+    screener_max_liquidity: float = float(os.environ.get("SCREENER_MAX_LIQUIDITY", "inf"))
 
     # ── 缓存与并发 ────────────────────────────────────────────────────────────
     cache_ttl: float = 5.0

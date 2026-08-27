@@ -628,10 +628,13 @@ class Guardian:
         返回一个 payload dict，由主线程 _apply_screener_result 应用。
         异常直接抛出，由 BackgroundDispatcher 统一捕获记录（不在此吞掉）。
         """
-        from screener import fetch_and_filter, analyze_orderbooks
+        from screener import fetch_and_filter, analyze_orderbooks, enrich_and_filter
 
         t0 = time.time()
         candidates = fetch_and_filter(self.cfg)
+        # 成交量/流动性上限过滤（gamma 补查），放在 orderbook 之前：
+        # 先滤掉已饱和市场，减少进入 /books 查询的候选数（尤其 Midterms 4755 候选）。
+        candidates = enrich_and_filter(candidates, self.cfg)
         scored = analyze_orderbooks(candidates, self.cfg)
         # 过滤现有流动性不足的市场
         scored = [m for m in scored
@@ -690,6 +693,7 @@ class Guardian:
             writer.writerow(["Market", "minSz", "Reward/day", "Competition",
                              "Comp_YES", "Comp_NO", "Comp_YES_2", "Comp_NO_2",
                              "Comp_YES_1", "Comp_NO_1",
+                             "Volume24h", "Liquidity", "VolumeTotal",
                              "yes_token_id", "no_token_id"])
             for m in sorted_m:
                 yes_ok = (m.yes_top3_bids >= self.cfg.screener_min_top3_bids
@@ -709,6 +713,9 @@ class Guardian:
                     f"{m.no_top2_bids:.0f}",
                     f"{m.yes_top1_bids:.0f}",
                     f"{m.no_top1_bids:.0f}",
+                    f"{m.volume24hr:.0f}",
+                    f"{m.liquidity:.0f}",
+                    f"{m.volume:.0f}",
                     m.yes_token_id if yes_ok else "",
                     m.no_token_id if no_ok else "",
                 ])

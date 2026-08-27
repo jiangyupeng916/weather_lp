@@ -641,6 +641,12 @@ best_bid（第 1 档买价）变化时：
 - `min_existing_size=2000`
 - `top1/2/3=100/400/1200`
 - `midpoint=[0.15,0.85]`
+- `max_volume_24h=inf`（24h 成交量上限，gamma `/markets` 补查；inf=不过滤）
+- `max_liquidity=inf`（总流动性上限，gamma 补查；inf=不过滤）
+
+> **成交量/流动性上限**（双接口方案）：`/sampling-markets` 只给 rewards 不给 volume/liquidity，
+> 用 `condition_id` 去 gamma `/markets` 补查后按上限过滤，排除已饱和市场。两个上限都是
+> `inf` 时不发起任何 gamma 请求（默认等同未加此功能）。漏掉的市场按 0 处理 → 放行。
 
 **评分公式**：
 ```

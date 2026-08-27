@@ -131,6 +131,9 @@ def _score_market(market: CandidateMarket, books: dict[str, dict], cfg) -> Score
         no_top2_bids=no_top2,
         yes_top1_bids=yes_top1,
         no_top1_bids=no_top1,
+        volume=market.volume,
+        volume24hr=market.volume24hr,
+        liquidity=market.liquidity,
     )
 
 
