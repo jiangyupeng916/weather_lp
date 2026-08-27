@@ -123,6 +123,11 @@ class Config:
     # sampling-markets 只给 rewards 不给 volume/liquidity，需用 condition_id 去
     # gamma /markets 补查后按上限过滤，排除成交量/流动性过高（已饱和、LP 收益被稀释）
     # 的市场。默认 inf = 不过滤（等同未加此功能）；≤0 会滤掉所有市场，慎设。
+    # 三者都是 market 级合计（YES+NO 两边），单位美元：
+    #   volume_total  = volumeNum（累计成交量，不限时间）
+    #   volume_24h    = volume24hr（近 24h 成交量）
+    #   liquidity     = liquidityNum（当前总流动性）
+    screener_max_volume_total: float = float(os.environ.get("SCREENER_MAX_VOLUME_TOTAL", "inf"))
     screener_max_volume_24h: float = float(os.environ.get("SCREENER_MAX_VOLUME_24H", "inf"))
     screener_max_liquidity: float = float(os.environ.get("SCREENER_MAX_LIQUIDITY", "inf"))
 

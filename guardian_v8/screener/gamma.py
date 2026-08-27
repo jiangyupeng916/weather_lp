@@ -91,13 +91,19 @@ def fetch_volume_liquidity(condition_ids: list[str], cfg) -> dict[str, dict]:
 def enrich_and_filter(candidates, cfg) -> list:
     """补查成交量/流动性，并按上限过滤（放在 orderbook 查询之前）。
 
-    - 两个上限都是 inf 时不发起任何 gamma 请求（默认不过滤，等同未加此功能）。
-    - 过滤用 volume24hr（近 24h 成交量）与 liquidity（当前总流动性）。
+    - 三个上限都是 inf 时不发起任何 gamma 请求（默认不过滤，等同未加此功能）。
+    - 过滤用 volume（累计成交量 volumeNum）、volume24hr（近 24h 成交量）、
+      liquidity（当前总流动性）。
     - 漏掉的市场按 0 处理，0 <= 上限恒成立 → 放行。
     """
+    max_vol_total = cfg.screener_max_volume_total
     max_vol = cfg.screener_max_volume_24h
     max_liq = cfg.screener_max_liquidity
-    if not candidates or (max_vol == float("inf") and max_liq == float("inf")):
+    if not candidates or (
+        max_vol_total == float("inf")
+        and max_vol == float("inf")
+        and max_liq == float("inf")
+    ):
         return candidates
 
     gamma_data = fetch_volume_liquidity([m.condition_id for m in candidates], cfg)
@@ -109,5 +115,7 @@ def enrich_and_filter(candidates, cfg) -> list:
 
     return [
         m for m in candidates
-        if m.volume24hr <= max_vol and m.liquidity <= max_liq
+        if m.volume <= max_vol_total
+        and m.volume24hr <= max_vol
+        and m.liquidity <= max_liq
     ]
