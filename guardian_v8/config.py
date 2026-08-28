@@ -74,7 +74,11 @@ class Config:
     maker_size: Decimal = field(
         default_factory=lambda: Decimal(os.environ.get("MAKER_SIZE", "50"))
     )
-    maker_rank: int = 2
+    # maker_rank 挂买盘第几档：默认 2（买二档）。可各 .env.botN 单独设 MAKER_RANK，
+    # 不同账号挂不同档位（如 bot1 挂买一、bot2 挂买三）。填非数字会在启动时报错（fail-fast）。
+    maker_rank: int = field(
+        default_factory=lambda: int(os.environ.get("MAKER_RANK", "2"))
+    )
     maker_cooldown: float = 120.0
     tick_size: Decimal = Decimal("0.01")
 

@@ -623,8 +623,8 @@ best_bid（第 1 档买价）变化时：
 
 | 参数 | 值 | 说明 |
 |------|-----|------|
-| `maker_size` | 50 | 每单挂单量（USDC） |
-| `maker_rank` | 2 | 挂买盘第几档（买二档） |
+| `maker_size` | 50 | 每单挂单量（USDC），`MAKER_SIZE` 可配 |
+| `maker_rank` | 2 | 挂买盘第几档（买二档），`MAKER_RANK` 可配 |
 | `maker_cooldown` | 120s | 撤单后冷却时间 |
 | `tick_size` | 0.01 | 保留字段（V8.3 起不再用于价格 round；市场 tick 各异，订单簿档位价即合法价） |
 | `heartbeat_interval` | 7s | 心跳间隔 |
