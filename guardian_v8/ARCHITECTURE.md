@@ -53,7 +53,7 @@ main.py
   ├─ monkey-patch httpx.Client → http2=False（必须在 SDK import 前）
   ├─ INSTANCE = "bot1"（切换账号改此变量）
   ├─ load_dotenv(.env.bot1)（必须在 import config 前）
-  ├─ _setup_logging()（控制台 INFO / 文件 DEBUG）
+  ├─ _setup_logging()（控制台 INFO / 文件默认 WARNING，LOG_LEVEL 可配）
   └─ Guardian(Config(instance_name=INSTANCE)).run()
 ```
 

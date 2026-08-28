@@ -87,11 +87,13 @@ def _setup_logging():
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("websocket").setLevel(logging.WARNING)
 
-    # 文件：DEBUG+（按大小自动轮转，防止 1000 市场级别下 DEBUG 全量日志撑爆磁盘）
-    # maxBytes=200MB × (backupCount 5 + 当前 1) = 总占用封顶 ~1.2GB。
-    # 轮转在进程内、logging 锁保护下完成，多线程安全；bot1/bot2 各写各自
+    # 文件：默认 WARNING+（只记异常/告警，省写盘 IO）。
+    # 生产日志从不被人工查看，debug/info 在高频 tick 与 WS 毫秒推送路径下刷屏，
+    # 每条都走「格式化 + 写盘 + flush」，是纯性能浪费。maxBytes=200MB ×
+    # (backupCount 5 + 当前 1) = 总占用封顶 ~1.2GB，多线程安全；botN 各写各自
     # data/<instance>/guardian.log，无跨进程争用。
-    # 注意：轮转后历史进入 guardian.log.1/.2/...，排查历史需 grep guardian.log*。
+    # 排查时如需更多线索，临时在 .env 设 LOG_LEVEL=INFO（或 DEBUG）再重启即可；
+    # 历史轮转进 guardian.log.1/.2/...，用 grep guardian.log* 查。
     from logging.handlers import RotatingFileHandler
     log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", INSTANCE)
     os.makedirs(log_dir, exist_ok=True)
@@ -101,7 +103,8 @@ def _setup_logging():
         backupCount=5,                 # 保留 guardian.log.1 ~ .5
         encoding="utf-8",
     )
-    fh.setLevel(logging.DEBUG)
+    _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "WARNING").upper(), logging.WARNING)
+    fh.setLevel(_log_level)
     fh.setFormatter(fmt)
     root.addHandler(fh)
 

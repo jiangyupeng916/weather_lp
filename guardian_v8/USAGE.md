@@ -256,6 +256,11 @@ tail -f /root/weather_lp/guardian_v8/data/bot1/guardian.log
 
 ### 5.2 专项检查
 
+> ⚠️ **日志级别说明**：`guardian.log` 默认只记 **WARNING+**（省写盘 IO）。下面这些
+> 专项排查里凡是 `HEARTBEAT` / `WS STATS` / `WS bid变化` / `SELL-TRIGGER` 等
+> **INFO/DEBUG 级别**的关键词，默认级别下**查不到**。需要排查时，先在对应 `.env.botN`
+> 里临时设 `LOG_LEVEL=INFO`（或 `DEBUG`）再重启，查完改回。`ERROR`/`WARNING` 检查不受影响。
+
 #### 错误和警告
 
 ```bash
