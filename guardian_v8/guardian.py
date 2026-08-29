@@ -1130,12 +1130,15 @@ class Guardian:
                 self._start_cooldown(ms, self.cfg.maker_cooldown)
 
         # 纠偏超价订单
+        # 只纠「严格高于 best_bid」的订单（挂贵了会被优先逆向成交）。
+        # 注意必须用 > 而非 >=：MAKER_RANK=1 挂买一档时挂单价 == best_bid，
+        # 是正常状态，若用 >= 会误判超价 → 每轮 audit 都撤单（挂二档则 < 不触发）。
         overpriced = []
         for o in buys:
             bb = best_bid_map.get(o.token_id)
             if bb is not None:
                 o_price_dec = Decimal(str(o.price))
-                if o_price_dec >= bb:
+                if o_price_dec > bb:
                     overpriced.append(o.token_id)
 
         if overpriced:
