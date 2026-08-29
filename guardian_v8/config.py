@@ -170,6 +170,10 @@ class Config:
         "WS_MARKET_URL", "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     )
     market_ping_interval: float = float(os.environ.get("MARKET_PING_INTERVAL", "10"))
+    # WS 心跳超时阈值（秒）：超过该时长未收到 PONG 判定断线，主动重连。
+    # 默认 50s（原为 ping_interval×2=20s），为「无交易死水市场」场景放宽——
+    # 这类市场 WS 上几乎无消息，偶发 PONG 延迟会误触 20s 阈值导致频繁断线撤单。
+    market_ping_timeout: float = float(os.environ.get("MARKET_PING_TIMEOUT", "50"))
     # 主线程每隔多久对齐一次 _markets ↔ WS 订阅列表
     ws_sub_sync_interval: float = 15.0
     # WS 启用时 REST 降频到此间隔只做兜底对账（禁用时用 best_bid_poll_interval=3s）

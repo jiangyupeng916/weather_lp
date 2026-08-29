@@ -58,6 +58,7 @@ class MarketWS:
         url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market",
         reconnect_delay: float = 5.0,
         ping_interval: float = 10.0,
+        ping_timeout: float = 50.0,
         proxy_url: Optional[str] = None,
         # 回调
         on_bid_changed: Optional[Callable[[str, Optional[Decimal], Decimal], None]] = None,
@@ -68,6 +69,7 @@ class MarketWS:
         self._url = url
         self._reconnect_delay = reconnect_delay
         self._ping_interval = ping_interval
+        self._ping_timeout = ping_timeout
         self._proxy_url = proxy_url
 
         # 回调
@@ -238,7 +240,7 @@ class MarketWS:
             if self._last_pong == 0.0:
                 continue  # 还没收到过 PONG，等首次连接稳定
             elapsed = time.time() - self._last_pong
-            threshold = self._ping_interval * 2
+            threshold = self._ping_timeout
             if elapsed > threshold:
                 logger.warning(
                     "[MarketWS] 心跳超时 %.1f/%.1f s，主动关闭触发重连", elapsed, threshold

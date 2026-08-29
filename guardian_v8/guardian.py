@@ -95,6 +95,7 @@ class Guardian:
             url=self.cfg.ws_market_url,
             reconnect_delay=self.cfg.ws_reconnect_delay,
             ping_interval=self.cfg.market_ping_interval,
+            ping_timeout=self.cfg.market_ping_timeout,
             proxy_url=self.cfg.proxy_url,
             on_bid_changed=self._enqueue_bid_change,
         )
