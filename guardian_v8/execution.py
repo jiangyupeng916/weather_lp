@@ -31,6 +31,11 @@ class ExecutionLayer:
     PLACE_TOKEN_TTL = 300.0
     CANCEL_TOKEN_MAX = 10000
     BATCH_CANCEL_MAX = 1000
+    # 批量撤单分片：Standard tier 的 cancel burst=120、refill=80/s（per-signer）。
+    # 批量撤单 token 成本 = order 数量，且 all-or-nothing——单批超过 burst 会被整批拒绝。
+    # 故每片 ≤100（< burst 120 留余量），片间隔 1.5s 让 token refill（100 token 需 ~1.25s 补满）。
+    CANCEL_CHUNK_SIZE = 100
+    CANCEL_CHUNK_INTERVAL = 1.5
 
     def __init__(self, client, cfg: Config):
         self._client = client
@@ -122,20 +127,37 @@ class ExecutionLayer:
         return fut
 
     def _do_cancel_batch(self, order_ids: List[str], reason: str, fut: Future):
-        self._rate_wait()
-        try:
-            # V8: cancel_orders(order_ids=[...]) → CancelOrdersResponse 对象（属性访问）
-            result = self._client.cancel_orders(order_ids=order_ids)
-            canceled = list(result.canceled) if result.canceled else []
-            not_canceled = dict(result.not_canceled) if result.not_canceled else {}
-            logger.debug("[BATCH CANCEL] %d/%d 已取消 | %s",
-                        len(canceled), len(order_ids), reason)
-            for oid, err in not_canceled.items():
-                logger.error("[BATCH CANCEL FAIL] %s... | %s", oid[:20], err)
-            fut.set_result({"canceled": canceled, "not_canceled": not_canceled})
-        except Exception as e:
-            logger.error("[BATCH CANCEL ERR] %d 条 | %s", len(order_ids), e)
-            fut.set_result({"canceled": [], "not_canceled": {oid: str(e) for oid in order_ids}})
+        # 分片撤单：单批 token 成本 = order 数量，超过 cancel burst 会被整批拒绝。
+        # 逐片发送，片间隔让 token refill；汇总所有片的 canceled/not_canceled 后一次性回写。
+        all_canceled: List[str] = []
+        all_not_canceled: Dict[str, str] = {}
+        chunks = [order_ids[i:i + self.CANCEL_CHUNK_SIZE]
+                  for i in range(0, len(order_ids), self.CANCEL_CHUNK_SIZE)]
+
+        for i, chunk in enumerate(chunks):
+            if i > 0:
+                # 片间隔：让 cancel token 从上一片消耗后 refill（refill 80/s）
+                time.sleep(self.CANCEL_CHUNK_INTERVAL)
+            self._rate_wait()
+            try:
+                # V8: cancel_orders(order_ids=[...]) → CancelOrdersResponse 对象（属性访问）
+                result = self._client.cancel_orders(order_ids=chunk)
+                canceled = list(result.canceled) if result.canceled else []
+                not_canceled = dict(result.not_canceled) if result.not_canceled else {}
+                all_canceled.extend(canceled)
+                all_not_canceled.update(not_canceled)
+                logger.debug("[BATCH CANCEL] 片 %d/%d：%d/%d 已取消 | %s",
+                             i + 1, len(chunks), len(canceled), len(chunk), reason)
+                for oid, err in not_canceled.items():
+                    logger.error("[BATCH CANCEL FAIL] %s... | %s", oid[:20], err)
+            except Exception as e:
+                logger.error("[BATCH CANCEL ERR] 片 %d/%d：%d 条 | %s",
+                             i + 1, len(chunks), len(chunk), e)
+                # 该片全部按失败记录，由 audit 下轮重试
+                for oid in chunk:
+                    all_not_canceled[oid] = str(e)
+
+        fut.set_result({"canceled": all_canceled, "not_canceled": all_not_canceled})
 
     # ── 全部撤单（SDK cancel_all） ────────────────────────────────────────────
     def cancel_all(self, reason: str = "") -> Future:

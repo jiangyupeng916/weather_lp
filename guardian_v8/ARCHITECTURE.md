@@ -505,7 +505,9 @@ Guardian 是 **纯 Maker（挂单方）** 做市机器人，运行在 Polymarket
 
 #### 6.2.5 批量撤单
 
-一轮检测到多个 best_bid 变化时，收集 order_id 一次 `cancel_orders`（≤1000）批量撤，而非逐个。
+一轮检测到多个 best_bid 变化时，收集 order_id 批量撤，而非逐个。因 Standard tier 的
+cancel burst=120（all-or-nothing，单批超 120 会被整批拒绝），`_do_cancel_batch` 内部按
+100/片分片，片间隔 1.5s 让 token refill（refill 80/s），汇总所有片结果后一次性回写。
 
 关闭时 `cancel_all` 一次清空。
 
