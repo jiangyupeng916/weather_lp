@@ -643,6 +643,8 @@ best_bid（第 1 档买价）变化时：
 - `min_existing_size=2000`
 - `top1/2/3=100/400/1200`
 - `midpoint=[0.15,0.85]`
+- `min_days_to_expiry=0`（剩余到期天数下限；max_days_to_expiry=inf 为上限，组成 [min,max] 范围）
+- `max_days_to_expiry=inf`（剩余到期天数上限，inf=不过滤；无 end_date 市场 days_to_expiry=inf，设有限上限会被排除）
 - `max_volume_total=inf`（累计成交量上限 = volumeNum，gamma `/markets` 补查；inf=不过滤）
 - `max_volume_24h=inf`（24h 成交量上限 = volume24hr，gamma `/markets` 补查；inf=不过滤）
 - `max_liquidity=inf`（总流动性上限 = liquidityNum，gamma 补查；inf=不过滤）

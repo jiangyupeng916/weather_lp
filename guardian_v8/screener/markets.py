@@ -73,12 +73,17 @@ def fetch_and_filter(cfg) -> list[CandidateMarket]:
             days_to_expiry = (end_date.timestamp() * 1000 - now) / (
                 1000 * 60 * 60 * 24
             )
-            if days_to_expiry < cfg.screener_min_days_to_expiry:
-                continue
         else:
-            # 无 end_date 的长期/赛季型市场：不按到期过滤，视为长期有效
+            # 无 end_date 的长期/赛季型市场：days_to_expiry=inf（不受 min 约束）
             end_date = None
             days_to_expiry = float("inf")
+
+        # 到期天数范围过滤 [min, max]：min 默认 0，max 默认 inf（不过滤）。
+        # 无 end_date 市场 days_to_expiry=inf，设有限 max 时会被排除（inf > max）。
+        if days_to_expiry < cfg.screener_min_days_to_expiry:
+            continue
+        if days_to_expiry > cfg.screener_max_days_to_expiry:
+            continue
 
         min_size = rewards.get("min_size", 0)
         if min_size < cfg.screener_min_size_lower or min_size > cfg.screener_min_size_upper:

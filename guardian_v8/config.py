@@ -115,6 +115,9 @@ class Config:
     )
     screener_min_daily_rewards: float = float(os.environ.get("SCREENER_MIN_DAILY_REWARDS", "10.0"))
     screener_min_days_to_expiry: float = float(os.environ.get("SCREENER_MIN_DAYS_TO_EXPIRY", "0"))
+    # 到期天数上限（inf=不过滤）：剩余天数 > 该值则跳过，与 min 组成 [min, max] 范围。
+    # 无 end_date 的长期市场 days_to_expiry=inf，若设有限上限会被排除（inf > 上限）。
+    screener_max_days_to_expiry: float = float(os.environ.get("SCREENER_MAX_DAYS_TO_EXPIRY", "inf"))
     screener_min_midpoint: float = float(os.environ.get("SCREENER_MIN_MIDPOINT", "0.15"))
     screener_max_midpoint: float = float(os.environ.get("SCREENER_MAX_MIDPOINT", "0.85"))
     screener_min_size_lower: float = float(os.environ.get("SCREENER_MIN_SIZE_LOWER", "0.0"))
