@@ -98,9 +98,11 @@ class Guardian:
             ping_timeout=self.cfg.market_ping_timeout,
             proxy_url=self.cfg.proxy_url,
             on_bid_changed=self._enqueue_bid_change,
+            on_trade=self._enqueue_trade,
         )
-        # 线程安全队列：WS 子线程写 → 主循环 _process_ws_bids 读
+        # 线程安全队列：WS 子线程写 → 主循环读
         self._ws_bid_queue: "queue.Queue[Tuple[str, Decimal]]" = queue.Queue()
+        self._ws_trade_queue: "queue.Queue[Tuple[str, Decimal, str]]" = queue.Queue()  # (token_id, price, side)
         # 断线检测状态（主线程独占读写）
         self._ws_was_connected: bool = False
         # ── 连接稳定性统计（主线程独占，便于后期 grep 判断要否换 B2） ──────────
@@ -896,6 +898,13 @@ class Guardian:
         """
         self._ws_bid_queue.put((token_id, new_bid))
 
+    def _enqueue_trade(self, token_id: str, price: Decimal, side: str) -> None:
+        """【WS 子线程】市场成交事件入队，由主线程 _process_ws_trades 消费。
+
+        WS 线程绝不碰 _markets——只投线程安全队列，保住主线程独占不变量。
+        """
+        self._ws_trade_queue.put((token_id, price, side))
+
     def _process_ws_bids(self) -> None:
         """【主线程】drain WS bid 队列，应用到状态机（与 REST 共用 _apply_bid_change）。
 
@@ -916,6 +925,38 @@ class Guardian:
                 cancels.append(token_id)
         if cancels:
             self._batch_cancel(cancels, "WS bid变化")
+
+    def _process_ws_trades(self) -> None:
+        """【主线程】drain WS trade 队列，根据策略决定是否撤单。
+
+        「有成交就撤单」策略（CANCEL_ON_TRADE=true + MAKER_RANK=1）：
+        死水市场偶尔有成交说明市场活了，撤单重挂刷新流动性。
+        只对 MAKER_RANK=1 生效（RANK=2+ 继续用 bid 变化撤单，不受影响）。
+        """
+        if not self.cfg.cancel_on_trade or self.cfg.maker_rank != 1:
+            # 策略未启用 或 不是 RANK=1 → 清空队列但不处理
+            while True:
+                try:
+                    self._ws_trade_queue.get_nowait()
+                except queue.Empty:
+                    break
+            return
+
+        cancels: List[str] = []
+        while True:
+            try:
+                token_id, price, side = self._ws_trade_queue.get_nowait()
+            except queue.Empty:
+                break
+            ms = self._markets.get(token_id)
+            if not ms or ms.state is not ActorState.RESTING or not ms.active_id:
+                continue
+            # RANK=1：任何成交都撤单（因为 best_bid 档位可能被影响）
+            cancels.append(token_id)
+            logger.debug("[WS TRADE] %s 成交 @%s side=%s → 触发撤单",
+                        token_id[:16], price, side)
+        if cancels:
+            self._batch_cancel(cancels, "市场成交")
 
     def _sync_ws_subscriptions(self) -> None:
         """【主线程】对齐 _markets 集合 ↔ MarketWS 订阅列表。
@@ -1666,6 +1707,7 @@ class Guardian:
                 now = time.time()
                 self._check_ws_connection(now)    # WS 断线检测 + 撤单 + 统计（在挂单门禁之前）
                 self._process_ws_bids()           # 消费 WS 毫秒级 bid 推送
+                self._process_ws_trades()         # 消费 WS 成交事件（RANK=1 有成交就撤单）
                 self._check_cooldowns(now)
                 self._check_pending_ops(now)      # 回写撤单/挂单结果
                 self._check_pending_sells()       # 消费 BUY 成交即时卖单队列

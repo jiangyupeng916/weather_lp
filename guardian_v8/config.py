@@ -82,6 +82,12 @@ class Config:
     maker_cooldown: float = 120.0
     tick_size: Decimal = Decimal("0.01")
 
+    # 「有成交就撤单」策略（MAKER_RANK=1 专用）：死水市场偶尔有成交说明市场活了，
+    # 撤单重挂刷新流动性。只对 MAKER_RANK=1 生效（RANK=2+ 继续用 bid 变化撤单）。
+    cancel_on_trade: bool = field(
+        default_factory=lambda: os.environ.get("CANCEL_ON_TRADE", "false").lower() == "true"
+    )
+
     # ── 执行层限流与重试 ──────────────────────────────────────────────────────
     exec_interval: float = 0.2
     place_retries: int = 2

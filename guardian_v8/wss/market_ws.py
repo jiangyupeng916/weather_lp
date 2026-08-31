@@ -62,6 +62,7 @@ class MarketWS:
         proxy_url: Optional[str] = None,
         # 回调
         on_bid_changed: Optional[Callable[[str, Optional[Decimal], Decimal], None]] = None,
+        on_trade: Optional[Callable[[str, Decimal, str], None]] = None,  # (token_id, price, side)
         on_disconnect: Optional[Callable[[], None]] = None,
         on_reconnect: Optional[Callable[[], None]] = None,
     ) -> None:
@@ -74,6 +75,7 @@ class MarketWS:
 
         # 回调
         self._on_bid_changed_cb = on_bid_changed
+        self._on_trade_cb = on_trade
         self._on_disconnect_cb = on_disconnect
         self._on_reconnect_cb = on_reconnect
 
@@ -321,10 +323,11 @@ class MarketWS:
     # ── 消息路由与解析 ────────────────────────────────────────────────────────
 
     def _route(self, data) -> None:
-        """Polymarket 消息路由：**无 type 字段，靠结构推断**。
+        """Polymarket 消息路由：优先读 type 字段，否则靠结构推断。
 
         - 数组 `[{market, asset_id, bids, asks}]` → book（订单簿快照）
         - 对象 `{market, price_changes: [{asset_id, best_bid, ...}]}` → price_change
+        - 对象 `{type: "last_trade_price", payload: {market, tokenId, price, ...}}` → last_trade_price
         - 对象 `{market, asset_id, bids, asks}` → 单条 book 快照（已解包）
         """
         if isinstance(data, list):
@@ -337,14 +340,20 @@ class MarketWS:
         if not isinstance(data, dict):
             return
 
-        # 对象消息：通过关键字段推断类型
+        # 优先检查 type 字段（文档格式）
+        msg_type = data.get("type")
+        if msg_type == "last_trade_price":
+            self._handle_last_trade_price(data)
+            return
+
+        # 对象消息：通过关键字段推断类型（兼容无 type 的旧格式）
         if "price_changes" in data:
             # price_change 格式：{market, price_changes: [...]}
             self._handle_price_change(data)
         elif "bids" in data or "asks" in data:
             # book 格式：{market, asset_id, bids, asks}
             self._handle_book(data)
-        # 其他类型（last_trade_price 等）暂不处理
+        # 其他未知类型忽略
 
     def _handle_book(self, data: dict) -> None:
         """全量订单簿快照：bids 从低到高排列，bids[-1] 是 best_bid。"""
@@ -399,3 +408,36 @@ class MarketWS:
             old_bid, changed = self._cache.update(asset_id, new_bid)
             if changed and self._on_bid_changed_cb:
                 self._on_bid_changed_cb(asset_id, old_bid, new_bid)
+
+    def _handle_last_trade_price(self, data: dict) -> None:
+        """市场成交事件：last_trade_price 推送（有实际成交时触发）。
+
+        文档格式（有 type + payload 结构）：
+          {
+            "type": "last_trade_price",
+            "payload": {
+              "market": "0x747dc...",
+              "tokenId": "10750588...",  ← 注意是 tokenId（驼峰），不是 asset_id
+              "price": "0.08",
+              "size": "219.217767",
+              "side": "SELL",
+              "timestamp": "1782753357257",
+              "transactionHash": "0xeeefff..."
+            }
+          }
+
+        回调 on_trade(token_id, price, side)，供 guardian 判断是否撤单。
+        """
+        payload = data.get("payload", {})
+        token_id = payload.get("tokenId") or payload.get("token_id", "")  # 兼容驼峰/下划线
+        if not token_id:
+            return
+
+        price = _to_decimal(payload.get("price"))
+        if price is None:
+            return
+
+        side = str(payload.get("side", "")).upper()
+        if self._on_trade_cb:
+            self._on_trade_cb(token_id, price, side)
+
