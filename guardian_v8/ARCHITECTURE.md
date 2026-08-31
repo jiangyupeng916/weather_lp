@@ -1,7 +1,7 @@
 # Guardian V8 架构文档
 
-> **版本**：V8.1  
-> **最后更新**：2026-08-04  
+> **版本**：V8.5  
+> **最后更新**：2026-08-29  
 > **阅读建议**：本文档整合了模块设计、策略逻辑、WebSocket 实现。新人先看 [README.md](./README.md)，运维手册见 [USAGE.md](./USAGE.md)。
 
 ---
@@ -611,10 +611,30 @@ best_bid（第 1 档买价）变化时：
 - 当前：REST `POST /books` 轮询（配置 3s，WSS 启用后变 30s 对账）+ 市场频道 WebSocket 实时推送（秒级）
 - 真正的下单价由 `_target_price()` 挂单前现查订单簿算 rank 档，`ms.best_bid` 只用来判断"要不要撤"
 
+### 6.5.1 「有成交就撤单」策略（MAKER_RANK=1 专用）
+
+**问题背景**：MAKER_RANK=1（挂买一档）在死水市场时，best_bid 几乎不变 → 现有「bid 变化撤单」失效 → 挂单一直不动，失去刷新流动性的意义。
+
+**策略**：WS 监听 `last_trade_price` 事件（市场有实际成交时推送），MAKER_RANK=1 时**任何成交都撤单重挂**。
+
+**启用条件**（必须同时满足）：
+- `CANCEL_ON_TRADE=true`（默认 false）
+- `MAKER_RANK=1`（RANK=2+ 不受影响，继续用 bid 变化撤单）
+
+**适用场景对比**：
+
+| 市场类型 | MAKER_RANK | CANCEL_ON_TRADE | 撤单触发 | 说明 |
+|---|---|---|---|---|
+| 死水市场（bot5） | 1 | true | bid 变化 + **市场成交** | 成交少，有成交说明市场活了 |
+| 活跃市场（bot1/2） | 2 | false | bid 变化 | bid 变化频繁够用，成交过于频繁 |
+
+**实现**：`_process_ws_trades()` 消费 WS 成交队列（`last_trade_price` 事件），RANK=1 时撤单（撤单原因：「市场成交」）。RANK=2+ 队列清空但不处理。
+
 ### 6.6 审计纠偏
 
 `audit()` 每 120s：
-- **超价纠偏**：批量查 best_bid，`挂单价 >= best_bid`（超价/跨价风险）→ 批量撤单
+- **超价纠偏**：批量查 best_bid，`挂单价 > best_bid`（严格大于，超价/跨价风险）→ 批量撤单。
+  - 注意：必须用 `>` 而非 `>=`，因为 MAKER_RANK=1 挂买一档时挂单价 == best_bid 是正常状态，`>=` 会误判超价导致每轮 audit 都撤单（已修复）。
 - **订单丢失恢复**：RESTING 但 `active_id` 不在 open_orders → 订单丢失，重置重挂
 - **卡死状态重置**：PLACING/CANCELING/NO_ORDER 卡死超时（`stale_timeout`=60s）→ 重置
 - **重复订单清理**：同一 token 多笔 BUY 单 → 只保留 `active_id`，撤其余重复单
@@ -627,12 +647,14 @@ best_bid（第 1 档买价）变化时：
 |------|-----|------|
 | `maker_size` | 50 | 每单挂单量（USDC），`MAKER_SIZE` 可配 |
 | `maker_rank` | 2 | 挂买盘第几档（买二档），`MAKER_RANK` 可配 |
+| `cancel_on_trade` | false | 「有成交就撤单」策略，`CANCEL_ON_TRADE` 可配，只对 RANK=1 生效 |
 | `maker_cooldown` | 120s | 撤单后冷却时间 |
 | `tick_size` | 0.01 | 保留字段（V8.3 起不再用于价格 round；市场 tick 各异，订单簿档位价即合法价） |
 | `heartbeat_interval` | 7s | 心跳间隔 |
 | `best_bid_poll_interval` | 3s | REST 轮询间隔（WSS 启用后变 30s） |
 | `audit_interval` | 120s | 审计周期 |
 | `position_interval` | 120s | 持仓扫描周期 |
+| `max_hold_hours` | 4 | 持仓超时强平（小时），`MAX_HOLD_HOURS` 可配 |
 | `sell_min_bid_gap` | 0.02 | 卖出价差保护（best_bid < 成本 - gap 时跳过） |
 | `position_threshold` | 1.0 | 最小卖出余额阈值 |
 
@@ -672,20 +694,22 @@ reward_per_dollar = total_daily_rewards / (existing_total_size + min_size)
 ```
 MarketWS (wss/market_ws.py)
   ├─ WebSocket 子线程接收消息
-  ├─ _route() 结构推断路由
-  ├─ _handle_price_change() 解析 best_bid
-  └─ _on_bid_changed_cb(asset_id, old_bid, new_bid)
+  ├─ _route() 优先读 type 字段（文档格式），否则结构推断
+  ├─ _handle_price_change() 解析 best_bid → 回调 on_bid_changed
+  ├─ _handle_last_trade_price() 解析成交事件 → 回调 on_trade (新增)
+  └─ 投线程安全队列 _ws_bid_queue / _ws_trade_queue
        ↓
-  投线程安全队列 _ws_bid_queue（主线程独占 _markets，WS 线程不碰）
-       ↓
-  主循环 _process_ws_bids() drain 队列
-       ↓
-  _apply_bid_change(ms, token_id, new_bid, None)  ← 与 REST 共享同一 helper
-       ↓
-  best_bid 变化 → 撤单（与 REST 轮询完全相同的逻辑）
+  主循环消费队列：
+    - _process_ws_bids() → _apply_bid_change() → best_bid 变化撤单
+    - _process_ws_trades() → 市场成交撤单（RANK=1 + CANCEL_ON_TRADE=true 时）
 ```
 
 **REST + WS 双路径物理合并**：`_apply_bid_change()` 是唯一入口，REST 轮询和 WS 推送都调它，保证处理逻辑完全一致，不再漂移。
+
+**WS 事件类型**（market 频道）：
+- `price_change`：best_bid/best_ask 变化推送（已处理）
+- `book`：订单簿快照（已处理）
+- `last_trade_price`：市场成交事件，含 price/size/side/transactionHash（新增处理，用于 RANK=1 撤单策略）
 
 ### 7.2 连接稳定性
 
