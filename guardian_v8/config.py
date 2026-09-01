@@ -152,7 +152,11 @@ class Config:
 
     # ── 持仓卖出阈值 ──────────────────────────────────────────────────────────
     position_threshold: float = 1.0
-    sell_min_bid_gap: Decimal = Decimal("0.02")  # best_bid 低于成本价-此值则跳过卖出
+    # 即时卖单（BUY 成交后立即卖）：best_bid < 成交价 - 此值 → 跳过等定时轮询
+    sell_min_bid_gap: Decimal = Decimal(os.environ.get("SELL_MIN_BID_GAP", "0.02"))
+    # 定时兜底（check_positions 每 120s）：best_ask < 成本价 - 此值 → 取消卖单等待回稳
+    # 默认 0.02 与历史一致；死水市场可设更大（如 0.05）放宽崩盘保护，持有更久等回稳
+    sell_position_gap: Decimal = Decimal(os.environ.get("SELL_POSITION_GAP", "0.02"))
 
     # ── 持仓超时强平（V8.4）─────────────────────────────────────────────────
     # 持仓自 bot 首次看到起超过 max_hold_hours 仍未卖出 → 无条件 FOK 市价全卖，

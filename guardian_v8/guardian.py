@@ -1430,13 +1430,13 @@ class Guardian:
 
             # best_ask 低于成本-gap（市场崩了）→ 取消现有卖单，持有等回稳
             if entry > 0:
-                min_ask = Decimal(str(entry)) - self.cfg.sell_min_bid_gap
+                min_ask = Decimal(str(entry)) - self.cfg.sell_position_gap
                 if ba < min_ask:
                     existing = sell_map.get(tid)
                     if existing:
                         logger.warning(
                             "[POSITION] %s best_ask=%s < 成本%.4f-%.2f=%.4f，取消卖单等待",
-                            tid[:16], ba, entry, self.cfg.sell_min_bid_gap, min_ask)
+                            tid[:16], ba, entry, self.cfg.sell_position_gap, min_ask)
                         self.exec_layer.cancel(existing[0], "best_ask过低取消卖单")
                     continue
 
