@@ -543,7 +543,7 @@ check_positions() 每 120s:
   2. 批量查 best_ask（POST /books，asks[-1] = 最低卖价）
   3. 查 open_orders 找已有卖单
   4. 对每个持仓：
-     - best_ask < 成本 - sell_min_bid_gap（市场崩了）→ 取消卖单，持有等回稳
+     - best_ask < 成本 - sell_position_gap（市场崩了）→ 取消卖单，持有等回稳
      - 已有卖单且价 == best_ask → 保持不动（保住队列位置）
      - 否则 → 查余额 → 挂/追价限价卖单 @ best_ask
 ```
@@ -655,7 +655,8 @@ best_bid（第 1 档买价）变化时：
 | `audit_interval` | 120s | 审计周期 |
 | `position_interval` | 120s | 持仓扫描周期 |
 | `max_hold_hours` | 4 | 持仓超时强平（小时），`MAX_HOLD_HOURS` 可配 |
-| `sell_min_bid_gap` | 0.02 | 卖出价差保护（best_bid < 成本 - gap 时跳过） |
+| `sell_min_bid_gap` | 0.02 | 即时卖单价差保护（best_bid < 成交价 - gap 时跳过），`SELL_MIN_BID_GAP` 可配 |
+| `sell_position_gap` | 0.02 | 定时兜底崩盘保护（best_ask < 成本 - gap 时取消卖单），`SELL_POSITION_GAP` 可配 |
 | `position_threshold` | 1.0 | 最小卖出余额阈值 |
 
 **筛选器参数**（`SCREENER_*`，`.env` 可覆盖）：
