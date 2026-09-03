@@ -668,14 +668,16 @@ best_bid（第 1 档买价）变化时：
 - `midpoint=[0.15,0.85]`
 - `min_days_to_expiry=0`（剩余到期天数下限；max_days_to_expiry=inf 为上限，组成 [min,max] 范围）
 - `max_days_to_expiry=inf`（剩余到期天数上限，inf=不过滤；无 end_date 市场 days_to_expiry=inf，设有限上限会被排除）
+- `min_volume_total=0`（累计成交量下限 = volumeNum，gamma 补查；0=不过滤，设有限值排除从未成交的冷门市场）
 - `max_volume_total=inf`（累计成交量上限 = volumeNum，gamma `/markets` 补查；inf=不过滤）
 - `max_volume_24h=inf`（24h 成交量上限 = volume24hr，gamma `/markets` 补查；inf=不过滤）
 - `max_liquidity=inf`（总流动性上限 = liquidityNum，gamma 补查；inf=不过滤）
 
-> **成交量/流动性上限**（双接口方案）：`/sampling-markets` 只给 rewards 不给 volume/liquidity，
-> 用 `condition_id` 去 gamma `/markets` 补查后按上限过滤，排除已饱和市场。三个上限都是
-> `inf` 时不发起任何 gamma 请求（默认等同未加此功能）。漏掉的市场按 0 处理 → 放行。
-> 三个字段都是 market 级合计（YES+NO 两边），单位美元。
+> **成交量/流动性过滤**（双接口方案）：`/sampling-markets` 只给 rewards 不给 volume/liquidity，
+> 用 `condition_id` 去 gamma `/markets` 补查后按 [min,max] 范围过滤。上限排除已饱和市场，
+> 下限（min_volume_total）排除从未成交的冷门市场。下限为 0 且三个上限都 `inf` 时不发起
+> 任何 gamma 请求（默认等同未加此功能）。漏掉的市场按 0 处理：上限方向放行，但设了
+> min_volume_total > 0 时会被下限排除。所有字段都是 market 级合计（YES+NO 两边），单位美元。
 
 **评分公式**：
 ```

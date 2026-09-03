@@ -132,14 +132,15 @@ class Config:
     screener_min_top1_bids: float = float(os.environ.get("SCREENER_MIN_TOP1_BIDS", "100.0"))
     screener_min_top2_bids: float = float(os.environ.get("SCREENER_MIN_TOP2_BIDS", "400.0"))
     screener_min_top3_bids: float = float(os.environ.get("SCREENER_MIN_TOP3_BIDS", "1200.0"))
-    # 成交量 / 流动性上限（gamma 补查，双接口方案）：
+    # 成交量 / 流动性过滤（gamma 补查，双接口方案）：
     # sampling-markets 只给 rewards 不给 volume/liquidity，需用 condition_id 去
-    # gamma /markets 补查后按上限过滤，排除成交量/流动性过高（已饱和、LP 收益被稀释）
-    # 的市场。默认 inf = 不过滤（等同未加此功能）；≤0 会滤掉所有市场，慎设。
-    # 三者都是 market 级合计（YES+NO 两边），单位美元：
+    # gamma /markets 补查后按 [min,max] 范围过滤。
+    # 上限排除已饱和市场，下限排除从未成交的冷门市场（想「市场至少有过成交再挂单」设 min）。
+    # 默认：下限 0=不过滤，上限 inf=不过滤。所有字段都是 market 级合计（YES+NO 两边），单位美元：
     #   volume_total  = volumeNum（累计成交量，不限时间）
     #   volume_24h    = volume24hr（近 24h 成交量）
     #   liquidity     = liquidityNum（当前总流动性）
+    screener_min_volume_total: float = float(os.environ.get("SCREENER_MIN_VOLUME_TOTAL", "0"))
     screener_max_volume_total: float = float(os.environ.get("SCREENER_MAX_VOLUME_TOTAL", "inf"))
     screener_max_volume_24h: float = float(os.environ.get("SCREENER_MAX_VOLUME_24H", "inf"))
     screener_max_liquidity: float = float(os.environ.get("SCREENER_MAX_LIQUIDITY", "inf"))
