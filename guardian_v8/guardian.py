@@ -368,6 +368,36 @@ class Guardian:
                         return True
         return False
 
+    def _cancel_pending_place_ops(self, token_id: str) -> int:
+        """清理指定市场在 _pending_ops 中的挂单相关操作（防止重复挂单）。
+
+        场景：audit 超时重置市场为 NO_ORDER + 冷却，但 _pending_ops 中仍有该市场的挂单请求。
+        若不清理，挂单完成后会绕过冷却直接变 RESTING，冷却到期时再次挂单 → 重复挂单。
+
+        清理的 op 类型：
+        - "target_price": 单个挂单的查价阶段（未完成）
+        - "place": 单个挂单的下单阶段（未完成）
+
+        注意：
+        - 只标记清理，不直接删除（删除会破坏 _check_pending_ops 的索引遍历）
+        - 已完成的 Future 不清理（让它正常处理，状态机会自动纠正）
+
+        Returns:
+            清理的 op 数量
+        """
+        cleared = 0
+        for i, (fut, tid, op, meta) in enumerate(self._pending_ops):
+            # 单个市场的挂单 op（target_price / place）
+            if tid == token_id and op in ("target_price", "place"):
+                # 只清理未完成的（已完成的让它正常处理，状态机会自动纠正）
+                if not fut.done():
+                    # 标记为已清理（用特殊 token_id 占位）
+                    self._pending_ops[i] = (fut, "_cleared_", op, meta)
+                    cleared += 1
+                    logger.debug("[AUDIT] 清理 %s pending op: %s", token_id[:16], op)
+
+        return cleared
+
     def _handle_cancel_result(self, ms: MarketState, token_id: str, ok: bool,
                                order_id: str, reason: str):
         if not ok:
@@ -455,6 +485,10 @@ class Guardian:
                 result = fut.result(timeout=0)
             except Exception:
                 result = False if op == "cancel" else None
+
+            # 跳过已被 audit 清理的 op（token_id 被标记为 "_cleared_"）
+            if token_id == "_cleared_":
+                continue
 
             # 批量撤单特殊处理：token_id 是 "_batch_" 占位符，无法用 _markets.get 查 ms
             if op == "cancel_batch":
@@ -1071,6 +1105,10 @@ class Guardian:
             elif ms.state == ActorState.PLACING \
                     and (now - ms.state_at) > self.cfg.stale_timeout:
                 logger.warning("[AUDIT] %s PLACING 超时重置", token_id[:16])
+                # 关键修复：清理 _pending_ops 中的挂单请求（防止重复挂单）
+                cleared = self._cancel_pending_place_ops(token_id)
+                if cleared > 0:
+                    logger.info("[AUDIT] %s 清理了 %d 个 pending 挂单请求", token_id[:16], cleared)
                 self.exec_layer.clear_place_by_asset(token_id)
                 ms.active_id = None
                 ms.active_price = None
@@ -1146,6 +1184,10 @@ class Guardian:
             if ms.state == ActorState.PLACING \
                     and (now - ms.state_at) > self.cfg.stale_timeout:
                 logger.warning("[AUDIT] %s PLACING 超时重置", token_id[:16])
+                # 关键修复：清理 _pending_ops 中的挂单请求（防止重复挂单）
+                cleared = self._cancel_pending_place_ops(token_id)
+                if cleared > 0:
+                    logger.info("[AUDIT] %s 清理了 %d 个 pending 挂单请求", token_id[:16], cleared)
                 self.exec_layer.clear_place_by_asset(token_id)
                 ms.active_id = None
                 ms.active_price = None

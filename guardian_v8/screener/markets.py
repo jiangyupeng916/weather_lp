@@ -97,10 +97,16 @@ def fetch_and_filter(cfg) -> list[CandidateMarket]:
         if keyword and keyword not in m["question"].lower():
             continue
 
-        # 标签筛选（OR 语义，大小写不敏感）：命中任一配置标签即保留
+        # 标签白名单（OR 语义，大小写不敏感）：命中任一配置标签即保留；空=不过滤
         if cfg.screener_tags:
             market_tags = {t.lower() for t in (m.get("tags") or [])}
             if not any(t in market_tags for t in cfg.screener_tags):
+                continue
+
+        # 标签黑名单（OR 语义，大小写不敏感）：命中任一配置标签即排除；空=不排除
+        if cfg.screener_exclude_tags:
+            market_tags = {t.lower() for t in (m.get("tags") or [])}
+            if any(t in market_tags for t in cfg.screener_exclude_tags):
                 continue
 
         candidates.append(

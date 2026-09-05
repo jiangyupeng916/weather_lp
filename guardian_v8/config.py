@@ -119,6 +119,16 @@ class Config:
             if t.strip() and not t.strip().startswith("#")
         )
     )
+    # 标签黑名单：逗号分隔的 label 列表，命中任一（OR）即排除；空=不排除。
+    # 过滤顺序：先白名单（SCREENER_TAGS）后黑名单，实现「保留 A 但去掉 B」的精细控制。
+    # 大小写不敏感，防御 # 注释（同白名单）。
+    screener_exclude_tags: tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            t.strip().lower()
+            for t in os.environ.get("SCREENER_EXCLUDE_TAGS", "").split(",")
+            if t.strip() and not t.strip().startswith("#")
+        )
+    )
     screener_min_daily_rewards: float = float(os.environ.get("SCREENER_MIN_DAILY_REWARDS", "10.0"))
     screener_min_days_to_expiry: float = float(os.environ.get("SCREENER_MIN_DAYS_TO_EXPIRY", "0"))
     # 到期天数上限（inf=不过滤）：剩余天数 > 该值则跳过，与 min 组成 [min, max] 范围。
