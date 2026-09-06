@@ -340,8 +340,8 @@ class MarketWS:
         if not isinstance(data, dict):
             return
 
-        # 优先检查 type 字段（文档格式）
-        msg_type = data.get("type")
+        # 优先检查 type / event_type 字段（SDK 用 type，原始 WS 用 event_type）
+        msg_type = data.get("type") or data.get("event_type")
         if msg_type == "last_trade_price":
             self._handle_last_trade_price(data)
             return
@@ -412,32 +412,47 @@ class MarketWS:
     def _handle_last_trade_price(self, data: dict) -> None:
         """市场成交事件：last_trade_price 推送（有实际成交时触发）。
 
-        文档格式（有 type + payload 结构）：
+        Polymarket 2026 实际格式（扁平结构，无 payload）：
+          {
+            "event_type": "last_trade_price",
+            "market": "0x747dc...",
+            "asset_id": "107505882767731489...",
+            "price": "0.08",
+            "size": "219.217767",
+            "fee_rate_bps": "0",
+            "side": "SELL",
+            "timestamp": "1782753357257",
+            "transaction_hash": "0xeeefff..."
+          }
+
+        SDK 格式（有 type + payload 结构，向后兼容）：
           {
             "type": "last_trade_price",
             "payload": {
-              "market": "0x747dc...",
-              "tokenId": "10750588...",  ← 注意是 tokenId（驼峰），不是 asset_id
+              "tokenId": "10750588...",
               "price": "0.08",
-              "size": "219.217767",
-              "side": "SELL",
-              "timestamp": "1782753357257",
-              "transactionHash": "0xeeefff..."
+              "side": "SELL"
             }
           }
 
         回调 on_trade(token_id, price, side)，供 guardian 判断是否撤单。
         """
-        payload = data.get("payload", {})
-        token_id = payload.get("tokenId") or payload.get("token_id", "")  # 兼容驼峰/下划线
-        if not token_id:
+        # 兼容两种格式：优先扁平格式（原始 WS），其次 payload 格式（SDK）
+        if "payload" in data:
+            # SDK 格式：有 payload 嵌套
+            payload = data["payload"]
+            token_id = payload.get("tokenId") or payload.get("token_id", "")
+            price = _to_decimal(payload.get("price"))
+            side = str(payload.get("side", "")).upper()
+        else:
+            # 原始 WS 格式：扁平结构
+            token_id = data.get("asset_id", "")
+            price = _to_decimal(data.get("price"))
+            side = str(data.get("side", "")).upper()
+
+        if not token_id or price is None:
             return
 
-        price = _to_decimal(payload.get("price"))
-        if price is None:
-            return
-
-        side = str(payload.get("side", "")).upper()
         if self._on_trade_cb:
             self._on_trade_cb(token_id, price, side)
 
