@@ -18,7 +18,7 @@ class CandidateMarket:
     volume: float = 0.0          # volumeNum 累计成交量
     volume24hr: float = 0.0      # volume24hr 近 24h 成交量
     liquidity: float = 0.0       # liquidityNum 当前总流动性
-    # 市场年龄（小时，gamma 补查 createdAt；漏查 = 0）
+    # 市场年龄（小时，gamma 补查 createdAt；未补查=0，漏查=inf 视为创建很久）
     age_hours: float = 0.0
 
 

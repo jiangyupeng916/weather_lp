@@ -41,17 +41,17 @@ def _safe_float(v, default: float = 0.0) -> float:
 def _created_age_hours(created_at) -> float:
     """gamma 的 createdAt（ISO 字符串）→ 市场年龄（小时）。
 
-    缺失或解析失败返回 0（与 volume/liquidity 漏查=0 语义一致，
-    设 min_age>0 时这些市场会被下限排除）。
+    缺失或解析失败返回 inf（视为「创建很久」）：
+    设 max_age 有限时这些市场会被上限排除，min 方向放行。
     """
     if not created_at:
-        return 0.0
+        return float("inf")
     try:
         created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
         if created.tzinfo is None:
             created = created.replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
-        return 0.0
+        return float("inf")
     age = (datetime.now(timezone.utc) - created).total_seconds() / 3600.0
     return age if age > 0 else 0.0
 
@@ -115,8 +115,10 @@ def enrich_and_filter(candidates, cfg) -> list:
       不发起任何 gamma 请求（等同未加此功能，向后兼容）。
     - 过滤用 volume（累计成交量 volumeNum）、volume24hr（近 24h 成交量）、
       liquidity（当前总流动性）、age_hours（市场年龄，createdAt 至今小时数）。
-    - 漏掉的市场按 0 处理：0 <= 上限恒成立 → 上限方向放行；
-      但若设了 min_volume_total > 0 或 min_age_hours > 0，漏掉的市场（0）会被下限排除。
+    - volume/liquidity 漏查按 0 处理：0 <= 上限恒成立 → 上限方向放行；
+      设 min_volume_total > 0 时漏查市场（0）会被下限排除。
+    - age_hours 漏查按 inf 处理（视为创建很久）：设 max_age 有限时被上限排除，
+      min 方向放行。
     """
     min_vol_total = cfg.screener_min_volume_total
     max_vol_total = cfg.screener_max_volume_total
@@ -141,7 +143,7 @@ def enrich_and_filter(candidates, cfg) -> list:
         m.volume = info.get("volume", 0.0)
         m.volume24hr = info.get("volume24hr", 0.0)
         m.liquidity = info.get("liquidity", 0.0)
-        m.age_hours = info.get("age_hours", 0.0)
+        m.age_hours = info.get("age_hours", float("inf"))
 
     return [
         m for m in candidates
