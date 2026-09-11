@@ -134,6 +134,7 @@ def _score_market(market: CandidateMarket, books: dict[str, dict], cfg) -> Score
         volume=market.volume,
         volume24hr=market.volume24hr,
         liquidity=market.liquidity,
+        age_hours=market.age_hours,
     )
 
 

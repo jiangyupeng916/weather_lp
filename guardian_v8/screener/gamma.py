@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
 import requests
 
@@ -35,6 +36,24 @@ def _safe_float(v, default: float = 0.0) -> float:
         return float(v) if v is not None else default
     except (TypeError, ValueError):
         return default
+
+
+def _created_age_hours(created_at) -> float:
+    """gamma 的 createdAt（ISO 字符串）→ 市场年龄（小时）。
+
+    缺失或解析失败返回 0（与 volume/liquidity 漏查=0 语义一致，
+    设 min_age>0 时这些市场会被下限排除）。
+    """
+    if not created_at:
+        return 0.0
+    try:
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return 0.0
+    age = (datetime.now(timezone.utc) - created).total_seconds() / 3600.0
+    return age if age > 0 else 0.0
 
 
 def _fetch_gamma_batch(condition_ids, gamma_api: str, retries: int = 5) -> dict[str, dict]:
@@ -63,6 +82,7 @@ def _fetch_gamma_batch(condition_ids, gamma_api: str, retries: int = 5) -> dict[
                     "volume": _safe_float(item.get("volumeNum")),
                     "volume24hr": _safe_float(item.get("volume24hr")),
                     "liquidity": _safe_float(item.get("liquidityNum")),
+                    "age_hours": _created_age_hours(item.get("createdAt")),
                 }
             return result
         except Exception:
@@ -73,7 +93,7 @@ def _fetch_gamma_batch(condition_ids, gamma_api: str, retries: int = 5) -> dict[
 
 
 def fetch_volume_liquidity(condition_ids: list[str], cfg) -> dict[str, dict]:
-    """批量补查，返回 {condition_id: {volume, volume24hr, liquidity}}。"""
+    """批量补查，返回 {condition_id: {volume, volume24hr, liquidity, age_hours}}。"""
     ids = list(dict.fromkeys(condition_ids))  # 去重保序
     if not ids:
         return {}
@@ -89,25 +109,29 @@ def fetch_volume_liquidity(condition_ids: list[str], cfg) -> dict[str, dict]:
 
 
 def enrich_and_filter(candidates, cfg) -> list:
-    """补查成交量/流动性，并按 [min,max] 范围过滤（放在 orderbook 查询之前）。
+    """补查成交量/流动性/创建时间，并按 [min,max] 范围过滤（放在 orderbook 查询之前）。
 
-    - 下限（min_volume_total，默认 0）和三个上限（默认 inf）都不过滤时，
+    - 下限（min_volume_total，默认 0）和所有上限（默认 inf）都不过滤时，
       不发起任何 gamma 请求（等同未加此功能，向后兼容）。
     - 过滤用 volume（累计成交量 volumeNum）、volume24hr（近 24h 成交量）、
-      liquidity（当前总流动性）。
+      liquidity（当前总流动性）、age_hours（市场年龄，createdAt 至今小时数）。
     - 漏掉的市场按 0 处理：0 <= 上限恒成立 → 上限方向放行；
-      但若设了 min_volume_total > 0，漏掉的市场（0）会被下限排除。
+      但若设了 min_volume_total > 0 或 min_age_hours > 0，漏掉的市场（0）会被下限排除。
     """
     min_vol_total = cfg.screener_min_volume_total
     max_vol_total = cfg.screener_max_volume_total
     max_vol = cfg.screener_max_volume_24h
     max_liq = cfg.screener_max_liquidity
-    # 短路：下限为 0 且三个上限都是 inf → 无任何过滤，跳过 gamma 查询
+    min_age = cfg.screener_min_age_hours
+    max_age = cfg.screener_max_age_hours
+    # 短路：下限为 0 且所有上限都是 inf → 无任何过滤，跳过 gamma 查询
     if not candidates or (
         min_vol_total <= 0
         and max_vol_total == float("inf")
         and max_vol == float("inf")
         and max_liq == float("inf")
+        and min_age <= 0
+        and max_age == float("inf")
     ):
         return candidates
 
@@ -117,6 +141,7 @@ def enrich_and_filter(candidates, cfg) -> list:
         m.volume = info.get("volume", 0.0)
         m.volume24hr = info.get("volume24hr", 0.0)
         m.liquidity = info.get("liquidity", 0.0)
+        m.age_hours = info.get("age_hours", 0.0)
 
     return [
         m for m in candidates
@@ -124,4 +149,6 @@ def enrich_and_filter(candidates, cfg) -> list:
         and m.volume <= max_vol_total
         and m.volume24hr <= max_vol
         and m.liquidity <= max_liq
+        and m.age_hours >= min_age
+        and m.age_hours <= max_age
     ]

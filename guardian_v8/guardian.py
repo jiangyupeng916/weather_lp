@@ -730,7 +730,7 @@ class Guardian:
             writer.writerow(["Market", "minSz", "Reward/day", "Competition",
                              "Comp_YES", "Comp_NO", "Comp_YES_2", "Comp_NO_2",
                              "Comp_YES_1", "Comp_NO_1",
-                             "Volume24h", "Liquidity", "VolumeTotal",
+                             "Volume24h", "Liquidity", "VolumeTotal", "AgeHours",
                              "yes_token_id", "no_token_id"])
             for m in sorted_m:
                 yes_ok = (m.yes_top3_bids >= self.cfg.screener_min_top3_bids
@@ -753,6 +753,7 @@ class Guardian:
                     f"{m.volume24hr:.0f}",
                     f"{m.liquidity:.0f}",
                     f"{m.volume:.0f}",
+                    f"{m.age_hours:.0f}",
                     m.yes_token_id if yes_ok else "",
                     m.no_token_id if no_ok else "",
                 ])

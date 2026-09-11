@@ -154,6 +154,13 @@ class Config:
     screener_max_volume_total: float = float(os.environ.get("SCREENER_MAX_VOLUME_TOTAL", "inf"))
     screener_max_volume_24h: float = float(os.environ.get("SCREENER_MAX_VOLUME_24H", "inf"))
     screener_max_liquidity: float = float(os.environ.get("SCREENER_MAX_LIQUIDITY", "inf"))
+    # 市场创建时间（age）过滤 [min, max]，单位小时：age = 现在 - createdAt。
+    # 下限过滤「刚创建的新市场」（如想「市场至少创建 12 小时再挂单」设 min=12），
+    # 上限过滤「太老的市场」。默认 0 / inf = 不过滤。
+    # 数据来自 gamma /markets 的 createdAt（sampling-markets 无此字段，走 gamma 补查）；
+    # 漏查的市场按 age=0 处理（设 min>0 时会被排除）。
+    screener_min_age_hours: float = float(os.environ.get("SCREENER_MIN_AGE_HOURS", "0"))
+    screener_max_age_hours: float = float(os.environ.get("SCREENER_MAX_AGE_HOURS", "inf"))
 
     # ── 缓存与并发 ────────────────────────────────────────────────────────────
     cache_ttl: float = 5.0
