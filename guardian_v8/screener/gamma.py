@@ -24,11 +24,16 @@ from datetime import datetime, timezone
 
 import requests
 
-# gamma /markets 限流 300 req/10s（官方 rate-limits）。批大小 50 是折中：
-# condition_id 长 66 字符，50 个拼 GET URL ≈ 4KB，避开常见 URL 长度截断上限。
-BATCH_SIZE = 50
-# 并发线程数。候选多时（如 4755 候选 = 96 批）串行很慢；96 批 < 300 限流，10 并发安全。
-MAX_WORKERS = 10
+# gamma /markets 限流 300 req/10s（官方 rate-limits），且**按出口 IP 计算** ——
+# 同机多 bot 共用 IP，配额是叠加的，故必须压低单 bot 的请求量。
+# 批大小取服务端硬上限 100（实测 101 个即报
+# {"error":"expected array length <= 100"}；官方文档未记载此限制）。
+# 100 相比 50 把批次数直接减半：bot6 295 批 → 148 批。
+BATCH_SIZE = 100
+# 并发线程数。服务器实测单批延迟约 0.15~0.18s，10 并发时单轮爆发仅约 4.5s ——
+# 爆发短于 10s 限流窗口，意味着整轮请求会挤进同一窗口（窗口内请求数 ≈ 批次数）。
+# 降到 5 后爆发约 5.4s，单 bot 窗口请求数由 295 降到 148，避免多 bot 叠加冲破 300。
+MAX_WORKERS = 5
 
 
 def _safe_float(v, default: float = 0.0) -> float:
