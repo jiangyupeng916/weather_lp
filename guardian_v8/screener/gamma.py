@@ -18,11 +18,14 @@ volumeNum/volume24hr/liquidityNum 但市场列表不全。故以 sampling-market
 
 from __future__ import annotations
 
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 import requests
+
+logger = logging.getLogger("guardian.screener.gamma")
 
 # gamma /markets 限流 300 req/10s（官方 rate-limits），且**按出口 IP 计算** ——
 # 同机多 bot 共用 IP，配额是叠加的，故必须压低单 bot 的请求量。
@@ -34,6 +37,14 @@ BATCH_SIZE = 100
 # 爆发短于 10s 限流窗口，意味着整轮请求会挤进同一窗口（窗口内请求数 ≈ 批次数）。
 # 降到 5 后爆发约 5.4s，单 bot 窗口请求数由 295 降到 148，避免多 bot 叠加冲破 300。
 MAX_WORKERS = 5
+# 批次级降级护栏：失败批次占比超过该值（且绝对值 > 2 批）→ 判定为系统性故障，
+# 主动放弃本轮筛选。宁可这一轮不更新 targets，也不能让 targets 变空 ——
+# 漏查市场按 volume=0 / age=inf 语义会被全部过滤掉，进而触发全量撤单。
+FAILURE_ABORT_RATIO = 0.2
+
+
+class _GammaForbidden(Exception):
+    """gamma 返回 403：确定性拒绝（IP 被限流/封锁），重试不可能成功。"""
 
 
 def _safe_float(v, default: float = 0.0) -> float:
@@ -68,6 +79,10 @@ def _fetch_gamma_batch(condition_ids, gamma_api: str, retries: int = 5) -> dict[
     for attempt in range(retries + 1):
         try:
             resp = requests.get(url, params=params, timeout=30)
+            # 403 是确定性拒绝（IP 被限流/封锁）：走下面的通用 except 会白等
+            # 2+4+6+8+10=30s 且必然再次失败，故单独立即抛出，交给上层降级处理。
+            if resp.status_code == 403:
+                raise _GammaForbidden(f"403 Forbidden ({len(condition_ids)} ids)")
             if resp.status_code == 429 and attempt < retries:
                 time.sleep(2 * (attempt + 1))
                 continue
@@ -90,6 +105,8 @@ def _fetch_gamma_batch(condition_ids, gamma_api: str, retries: int = 5) -> dict[
                     "age_hours": _created_age_hours(item.get("createdAt")),
                 }
             return result
+        except _GammaForbidden:
+            raise  # 确定性拒绝：不重试，立即上抛（由批次级降级兜住）
         except Exception:
             if attempt < retries:
                 time.sleep(2 * (attempt + 1))
@@ -98,18 +115,42 @@ def _fetch_gamma_batch(condition_ids, gamma_api: str, retries: int = 5) -> dict[
 
 
 def fetch_volume_liquidity(condition_ids: list[str], cfg) -> dict[str, dict]:
-    """批量补查，返回 {condition_id: {volume, volume24hr, liquidity, age_hours}}。"""
+    """批量补查，返回 {condition_id: {volume, volume24hr, liquidity, age_hours}}。
+
+    批次级降级：个别批次失败只丢那一批市场，不再一票否决整轮 ——
+    原实现 `out.update(fut.result())` 会让 148 批里 1 批 403 就废掉整轮，
+    进而使 _apply_market_targets 不执行、不达标市场永不撤单。
+    护栏：失败面过大时主动抛异常放弃本轮（见 FAILURE_ABORT_RATIO 注释）。
+    """
     ids = list(dict.fromkeys(condition_ids))  # 去重保序
     if not ids:
         return {}
     batches = [ids[i:i + BATCH_SIZE] for i in range(0, len(ids), BATCH_SIZE)]
     out: dict[str, dict] = {}
+    failed = 0
+    first_err: Exception | None = None
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {
             executor.submit(_fetch_gamma_batch, b, cfg.gamma_api): b for b in batches
         }
         for fut in as_completed(futures):
-            out.update(fut.result())
+            try:
+                out.update(fut.result())
+            except Exception as e:  # noqa: BLE001 — 单批失败降级，不中断整轮
+                failed += 1
+                if first_err is None:
+                    first_err = e
+
+    if failed:
+        logger.warning(
+            "[GAMMA] %d/%d 批失败，本轮缺约 %d 个市场的数据 | 首个错误: %s",
+            failed, len(batches), failed * BATCH_SIZE, first_err,
+        )
+        # 护栏：失败面过大 → 系统性故障，放弃本轮（保持原 targets，避免全量撤单）
+        if failed > max(2, int(len(batches) * FAILURE_ABORT_RATIO)):
+            raise RuntimeError(
+                f"gamma 补查失败面过大（{failed}/{len(batches)} 批），放弃本轮筛选"
+            )
     return out
 
 
