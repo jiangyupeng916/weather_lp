@@ -89,7 +89,10 @@ class Config:
     )
 
     # ── 执行层限流与重试 ──────────────────────────────────────────────────────
-    exec_interval: float = 0.2
+    # 写操作（下单/撤单）最小间隔 = 全局写速率上限。0.025s = 40 写/s，
+    # 对齐 Polymarket 按签名者地址的下单桶（Standard tier 40/s，见 trading-rate-limits；
+    # 撤单桶更高 80/s）。原 0.2s=5 写/s 过保守，追价慢 8 倍。IP 限流仍作第二道闸。
+    exec_interval: float = 0.025
     place_retries: int = 2
     place_retry_delay: float = 1.0
     max_workers: int = 10
