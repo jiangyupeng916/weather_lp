@@ -147,3 +147,17 @@ def test_below_threshold_not_sold():
     g._holding_since["tokA"] = time.time() - 5 * 3600
     g.check_positions()
     assert g.exec_layer.market_sells == []
+
+
+def test_balance_query_failure_skips_sale():
+    """余额查询失败（onchain_balance 返回 None）→ 跳过而非崩溃或误卖。
+
+    回归保护：若下游漏处理 None，`None <= 1.0` 会抛 TypeError；
+    若退化为「None 当 0 处理」，则查不到余额时强平被静默跳过（逃生通道失效）。
+    """
+    g = _make_guardian(max_hold_hours=4.0)
+    g._pos = [{"asset": "tokA", "avgPrice": "0.5"}]
+    g._holding_since["tokA"] = time.time() - 5 * 3600  # 已超时
+    g.onchain_balance = lambda tid: None                # 查询失败
+    g.check_positions()                                 # 不应抛 TypeError
+    assert g.exec_layer.market_sells == []

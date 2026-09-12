@@ -1069,13 +1069,16 @@ class Guardian:
             logger.error("查询持仓失败: %s", e)
             return []
 
-    def onchain_balance(self, token_id: str) -> float:
-        """查询条件代币链上余额。
+    def onchain_balance(self, token_id: str) -> Optional[float]:
+        """查询条件代币链上余额；查询失败返回 None（区别于「真的 0 持仓」）。
 
         V8.1：改用 SDK get_balance_allowance（内部正确签 L2 头）。
         旧实现手搓 REST 只发 POLY_ADDRESS → 该端点需完整 L2 签名 → 恒 401 →
         静默返回 0.0，导致 check_positions / _sell_single_position 全部跳过，
         持仓永远挂不出卖单。BalanceAllowance.balance 为 base units（1e6）。
+
+        V8.4：修复「查询失败」与「余额为 0」混同为同一个 0.0 的缺陷 ——
+        失败改返回 None，下游据此告警 + 跳过/放弃，而不是静默当作没持仓。
         """
         try:
             ba = self.client.get_balance_allowance(
@@ -1085,7 +1088,7 @@ class Guardian:
             return ba.balance / 1_000_000
         except Exception as e:
             logger.error("余额查询失败 %s...: %s", token_id[:20], e)
-            return 0.0
+            return None
 
     # ── 审计 ──────────────────────────────────────────────────────────────────
     def _audit_timeouts_only(self):
@@ -1448,6 +1451,12 @@ class Guardian:
                     self._selling.add(tid)
                 try:
                     bal = self.onchain_balance(tid)
+                    if bal is None:
+                        logger.warning(
+                            "[MAX-HOLD] %s 余额查询失败，跳过本轮强平（下轮重试）",
+                            tid[:16],
+                        )
+                        continue
                     if bal <= self.cfg.position_threshold:
                         continue
                     age_h = (now_ts - self._holding_since.get(tid, now_ts)) / 3600.0
@@ -1495,6 +1504,12 @@ class Guardian:
 
             try:
                 bal = self.onchain_balance(tid)
+                if bal is None:
+                    logger.warning(
+                        "[POSITION] %s 余额查询失败，跳过本轮卖出（下轮重试）",
+                        tid[:16],
+                    )
+                    continue
                 if bal <= self.cfg.position_threshold:
                     continue
 
@@ -1583,9 +1598,16 @@ class Guardian:
                 return
 
             # 4. 查链上余额（BUY 刚成交时链上余额可能延迟到账，最多重试 5 次，间隔 2s）
-            bal = Decimal("0")
+            #    查询失败（None）≠ 没到账（0）：前者放弃交 120s 兜底，后者继续等。
+            bal = 0.0
             for attempt in range(1, 6):
                 bal = self.onchain_balance(tid)
+                if bal is None:
+                    logger.warning(
+                        "[SELL-TRIGGER] %s 余额查询失败，放弃即时卖单（交 120s 兜底）",
+                        tid[:16],
+                    )
+                    return
                 if bal > self.cfg.position_threshold:
                     break
                 if attempt < 5:
