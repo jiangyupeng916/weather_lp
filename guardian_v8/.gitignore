@@ -31,3 +31,4 @@ nohup.out
 *.log
 .env
 .env.*
+!.env.example
