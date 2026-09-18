@@ -689,10 +689,10 @@ class Guardian:
             no_ok = (m.no_top3_bids >= self.cfg.screener_min_top3_bids
                      and m.no_top2_bids >= self.cfg.screener_min_top2_bids
                      and m.no_top1_bids >= self.cfg.screener_min_top1_bids)
-            if yes_ok:
+            if yes_ok and self.cfg.screener_outcome in ("both", "yes"):
                 targets.append((m.yes_token_id, f"{title} [YES]" if title else ""))
                 yes_count += 1
-            if no_ok:
+            if no_ok and self.cfg.screener_outcome in ("both", "no"):
                 targets.append((m.no_token_id, f"{title} [NO]" if title else ""))
                 no_count += 1
 

@@ -164,6 +164,10 @@ class Config:
     # 漏查的市场按 age=inf 处理（视为创建很久，设 max 有限时会被排除）。
     screener_min_age_hours: float = float(os.environ.get("SCREENER_MIN_AGE_HOURS", "0"))
     screener_max_age_hours: float = float(os.environ.get("SCREENER_MAX_AGE_HOURS", "inf"))
+    # 挂单方向过滤：both（默认，YES/NO 都挂）/ yes（只挂 YES）/ no（只挂 NO）。
+    # 只过滤最终挂单（targets），不影响评分/排序/CSV（CSV 仍展示两方向完整信息）。
+    # 切换方向后，反方向的旧挂单会在下一轮筛选被撤（_apply_market_targets 移除逻辑）。
+    screener_outcome: str = os.environ.get("SCREENER_OUTCOME", "both").lower()
 
     # ── 缓存与并发 ────────────────────────────────────────────────────────────
     cache_ttl: float = 5.0
@@ -253,4 +257,8 @@ class Config:
             raise EnvironmentError(
                 "设置了 RELAYER_API_KEY（POLYMARKET_RELAYER_API_KEY）但缺少 "
                 "RELAYER_API_KEY_ADDRESS（POLYMARKET_RELAYER_API_KEY_ADDRESS）：新账户需两者配对"
+            )
+        if self.screener_outcome not in ("both", "yes", "no"):
+            raise EnvironmentError(
+                f"SCREENER_OUTCOME 取值非法 {self.screener_outcome!r}：只允许 both/yes/no"
             )
