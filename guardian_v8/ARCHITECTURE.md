@@ -611,24 +611,26 @@ best_bid（第 1 档买价）变化时：
 - 当前：REST `POST /books` 轮询（配置 3s，WSS 启用后变 30s 对账）+ 市场频道 WebSocket 实时推送（秒级）
 - 真正的下单价由 `_target_price()` 挂单前现查订单簿算 rank 档，`ms.best_bid` 只用来判断"要不要撤"
 
-### 6.5.1 「有成交就撤单」策略（MAKER_RANK=1 专用）
+### 6.5.1 「有成交就撤单」策略（CANCEL_ON_TRADE，全档位生效）
 
-**问题背景**：MAKER_RANK=1（挂买一档）在死水市场时，best_bid 几乎不变 → 现有「bid 变化撤单」失效 → 挂单一直不动，失去刷新流动性的意义。
+**问题背景**：死水市场里 best_bid 几乎不变 → 现有「bid 变化撤单」失效 → 挂单一直不动，失去刷新流动性的意义。
 
-**策略**：WS 监听 `last_trade_price` 事件（市场有实际成交时推送），MAKER_RANK=1 时**任何成交都撤单重挂**。
+**策略**：WS 监听 `last_trade_price` 事件（市场有实际成交时推送），启用时**任何成交都撤单重挂**。
 
-**启用条件**（必须同时满足）：
+**启用条件**：
 - `CANCEL_ON_TRADE=true`（默认 false）
-- `MAKER_RANK=1`（RANK=2+ 不受影响，继续用 bid 变化撤单）
+- 对所有档位（MAKER_RANK=1/2+）均生效
+
+**注意 120s 冷却**：撤单后仍走统一冷却（`maker_cooldown=120s`）再重挂，**不是立即重挂**。因此在场率 ≈ 成交间隔/(成交间隔+120s)，只有成交稀疏的死水市场才适用。
 
 **适用场景对比**：
 
-| 市场类型 | MAKER_RANK | CANCEL_ON_TRADE | 撤单触发 | 说明 |
-|---|---|---|---|---|
-| 死水市场（bot5） | 1 | true | bid 变化 + **市场成交** | 成交少，有成交说明市场活了 |
-| 活跃市场（bot1/2） | 2 | false | bid 变化 | bid 变化频繁够用，成交过于频繁 |
+| 市场类型 | CANCEL_ON_TRADE | 撤单触发 | 说明 |
+|---|---|---|---|
+| 死水市场（bot5/bot6） | true | bid 变化 + **市场成交** | 成交少，有成交说明市场活了 |
+| 活跃市场（bot1/2） | false | bid 变化 | bid 变化频繁够用；成交频繁会让订单长期不在场 |
 
-**实现**：`_process_ws_trades()` 消费 WS 成交队列（`last_trade_price` 事件），RANK=1 时撤单（撤单原因：「市场成交」）。RANK=2+ 队列清空但不处理。
+**实现**：`_process_ws_trades()` 消费 WS 成交队列（`last_trade_price` 事件），启用时撤单（撤单原因：「市场成交」）；未启用则队列清空但不处理。
 
 ### 6.6 审计纠偏
 
@@ -647,7 +649,7 @@ best_bid（第 1 档买价）变化时：
 |------|-----|------|
 | `maker_size` | 50 | 每单挂单量（USDC），`MAKER_SIZE` 可配 |
 | `maker_rank` | 2 | 挂买盘第几档（买二档），`MAKER_RANK` 可配 |
-| `cancel_on_trade` | false | 「有成交就撤单」策略，`CANCEL_ON_TRADE` 可配，只对 RANK=1 生效 |
+| `cancel_on_trade` | false | 「有成交就撤单」策略，`CANCEL_ON_TRADE` 可配，所有档位生效（撤单后仍等 120s 冷却重挂） |
 | `maker_cooldown` | 120s | 撤单后冷却时间 |
 | `tick_size` | 0.01 | 保留字段（V8.3 起不再用于价格 round；市场 tick 各异，订单簿档位价即合法价） |
 | `heartbeat_interval` | 7s | 心跳间隔 |
@@ -704,7 +706,7 @@ MarketWS (wss/market_ws.py)
        ↓
   主循环消费队列：
     - _process_ws_bids() → _apply_bid_change() → best_bid 变化撤单
-    - _process_ws_trades() → 市场成交撤单（RANK=1 + CANCEL_ON_TRADE=true 时）
+    - _process_ws_trades() → 市场成交撤单（CANCEL_ON_TRADE=true 时，全档位生效）
 ```
 
 **REST + WS 双路径物理合并**：`_apply_bid_change()` 是唯一入口，REST 轮询和 WS 推送都调它，保证处理逻辑完全一致，不再漂移。
@@ -712,7 +714,7 @@ MarketWS (wss/market_ws.py)
 **WS 事件类型**（market 频道）：
 - `price_change`：best_bid/best_ask 变化推送（已处理）
 - `book`：订单簿快照（已处理）
-- `last_trade_price`：市场成交事件，含 price/size/side/transactionHash（新增处理，用于 RANK=1 撤单策略）
+- `last_trade_price`：市场成交事件，含 price/size/side/transactionHash（用于 CANCEL_ON_TRADE 撤单策略）
 
 ### 7.2 连接稳定性
 

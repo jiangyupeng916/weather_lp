@@ -82,8 +82,9 @@ class Config:
     maker_cooldown: float = 120.0
     tick_size: Decimal = Decimal("0.01")
 
-    # 「有成交就撤单」策略（MAKER_RANK=1 专用）：死水市场偶尔有成交说明市场活了，
-    # 撤单重挂刷新流动性。只对 MAKER_RANK=1 生效（RANK=2+ 继续用 bid 变化撤单）。
+    # 「有成交就撤单」策略：死水市场偶尔有成交说明市场活了，撤单重挂刷新流动性。
+    # 对所有档位生效（默认 false）。撤单后仍走统一冷却（maker_cooldown=120s）再重挂，
+    # 故成交稀疏的市场才适用 —— 活跃市场会导致订单大部分时间不在场。
     cancel_on_trade: bool = field(
         default_factory=lambda: os.environ.get("CANCEL_ON_TRADE", "false").lower() == "true"
     )

@@ -200,6 +200,63 @@ def test_process_ws_bids_empty_queue_noop():
     assert g._batch_cancel_calls == []
 
 
+# ── _process_ws_trades：有成交就撤单（全档位生效）─────────────────────────────
+
+def _trade_guardian(cancel_on_trade, maker_rank=1):
+    """裸 Guardian + 成交队列 + 策略开关。"""
+    g = _bare_guardian()
+    g.cfg.cancel_on_trade = cancel_on_trade
+    g.cfg.maker_rank = maker_rank
+    g._ws_trade_queue = queue.Queue()
+    return g
+
+
+def test_process_ws_trades_rank2_cancels():
+    """RANK=2 + CANCEL_ON_TRADE=true → 撤单。
+
+    本次放开了「仅 RANK=1 生效」的档位限制，这是新增行为。
+    """
+    g = _trade_guardian(True, maker_rank=2)
+    g._markets["a"] = MarketState(state=ActorState.RESTING, active_id="oid-a")
+    g._ws_trade_queue.put(("a", Decimal("0.50"), "BUY"))
+    g._process_ws_trades()
+    assert len(g._batch_cancel_calls) == 1
+    tids, reason = g._batch_cancel_calls[0]
+    assert tids == ["a"] and reason == "市场成交"
+
+
+def test_process_ws_trades_rank1_still_cancels():
+    """RANK=1 行为不变 —— 回归保护。"""
+    g = _trade_guardian(True, maker_rank=1)
+    g._markets["a"] = MarketState(state=ActorState.RESTING, active_id="oid-a")
+    g._ws_trade_queue.put(("a", Decimal("0.50"), "SELL"))
+    g._process_ws_trades()
+    assert len(g._batch_cancel_calls) == 1
+    assert g._batch_cancel_calls[0][1] == "市场成交"
+
+
+def test_process_ws_trades_disabled_drains_without_cancel():
+    """CANCEL_ON_TRADE=false → 不撤单，但队列仍被清空（不积压）。"""
+    g = _trade_guardian(False, maker_rank=1)
+    g._markets["a"] = MarketState(state=ActorState.RESTING, active_id="oid-a")
+    g._ws_trade_queue.put(("a", Decimal("0.50"), "BUY"))
+    g._process_ws_trades()
+    assert g._batch_cancel_calls == []
+    assert g._ws_trade_queue.empty(), "队列应被清空"
+
+
+def test_process_ws_trades_skips_non_resting():
+    """只有 RESTING 且有 active_id 的 token 才撤单；COOLING/无单 跳过。"""
+    g = _trade_guardian(True, maker_rank=2)
+    g._markets["cooling"] = MarketState(state=ActorState.COOLING, active_id="oid-c")
+    g._markets["noorder"] = MarketState(state=ActorState.NO_ORDER)
+    g._ws_trade_queue.put(("cooling", Decimal("0.5"), "BUY"))
+    g._ws_trade_queue.put(("noorder", Decimal("0.5"), "BUY"))
+    g._ws_trade_queue.put(("ghost", Decimal("0.5"), "BUY"))   # 不在 _markets
+    g._process_ws_trades()
+    assert g._batch_cancel_calls == []
+
+
 # ── _sync_ws_subscriptions：订阅 diff ─────────────────────────────────────────
 
 def test_sync_subscriptions_adds_new_markets():

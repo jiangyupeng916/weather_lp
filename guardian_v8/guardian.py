@@ -964,12 +964,16 @@ class Guardian:
     def _process_ws_trades(self) -> None:
         """【主线程】drain WS trade 队列，根据策略决定是否撤单。
 
-        「有成交就撤单」策略（CANCEL_ON_TRADE=true + MAKER_RANK=1）：
+        「有成交就撤单」策略（CANCEL_ON_TRADE=true，默认 false）：
         死水市场偶尔有成交说明市场活了，撤单重挂刷新流动性。
-        只对 MAKER_RANK=1 生效（RANK=2+ 继续用 bid 变化撤单，不受影响）。
+        对所有档位生效（RANK=1/2+ 均可）。
+
+        注意：撤单后仍走统一冷却（maker_cooldown=120s）再重挂，不是立即重挂。
+        故成交越稀疏的市场越适用 —— 活跃市场成交频繁会导致订单大部分时间
+        不在场（在场率 ≈ 成交间隔 /(成交间隔+120s)），慎用。
         """
-        if not self.cfg.cancel_on_trade or self.cfg.maker_rank != 1:
-            # 策略未启用 或 不是 RANK=1 → 清空队列但不处理
+        if not self.cfg.cancel_on_trade:
+            # 策略未启用 → 清空队列但不处理
             while True:
                 try:
                     self._ws_trade_queue.get_nowait()
@@ -986,7 +990,7 @@ class Guardian:
             ms = self._markets.get(token_id)
             if not ms or ms.state is not ActorState.RESTING or not ms.active_id:
                 continue
-            # RANK=1：任何成交都撤单（因为 best_bid 档位可能被影响）
+            # 任何成交都撤单（成交说明市场活跃，best_bid 档位可能被影响）
             cancels.append(token_id)
             logger.debug("[WS TRADE] %s 成交 @%s side=%s → 触发撤单",
                         token_id[:16], price, side)
