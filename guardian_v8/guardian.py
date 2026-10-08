@@ -152,9 +152,15 @@ class Guardian:
                     self.cfg.screener_min_top1_bids, self.cfg.screener_min_top2_bids,
                     self.cfg.screener_min_top3_bids, self.cfg.screener_min_existing_size,
                     self.cfg.screener_min_daily_rewards)
-        logger.info("实例: %s | midpoint=[%.2f, %.2f]",
-                    self.cfg.instance_name,
-                    self.cfg.screener_min_midpoint, self.cfg.screener_max_midpoint)
+        midpoint_ranges = getattr(self.cfg, "screener_midpoint_ranges", ())
+        if midpoint_ranges:
+            logger.info("实例: %s | midpoint=%s (多区间，替代 MIN/MAX)",
+                        self.cfg.instance_name,
+                        ", ".join(f"[{lower:g}, {upper:g}]" for lower, upper in midpoint_ranges))
+        else:
+            logger.info("实例: %s | midpoint=[%.2f, %.2f]",
+                        self.cfg.instance_name,
+                        self.cfg.screener_min_midpoint, self.cfg.screener_max_midpoint)
         logger.info("超时强平: %s | max_hold=%.1fh",
                     "启用" if self.cfg.max_hold_enabled else "关闭",
                     self.cfg.max_hold_hours)

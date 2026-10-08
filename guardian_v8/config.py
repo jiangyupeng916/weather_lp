@@ -40,6 +40,30 @@ def _load_screener_tick_size() -> Optional[Decimal]:
     return tick
 
 
+def _load_screener_midpoint_ranges() -> tuple[tuple[float, float], ...]:
+    """解析多个闭区间；空值回退到原有 MIN/MAX 筛选。"""
+    raw = os.environ.get("SCREENER_MIDPOINT_RANGES", "").strip()
+    if not raw:
+        return ()
+    ranges = []
+    try:
+        for item in raw.split(","):
+            parts = item.split(":")
+            if len(parts) != 2:
+                raise ValueError("每个区间必须是 下限:上限")
+            lower, upper = (float(part.strip()) for part in parts)
+            # 此判断同时拒绝 NaN、Infinity、越界值和反向区间。
+            if not 0 <= lower <= upper <= 1:
+                raise ValueError("区间必须满足 0 <= 下限 <= 上限 <= 1")
+            ranges.append((lower, upper))
+    except ValueError as exc:
+        raise EnvironmentError(
+            f"SCREENER_MIDPOINT_RANGES 取值非法 {raw!r}："
+            "格式示例 0:0.1,0.9:1；每个区间须满足 0 <= 下限 <= 上限 <= 1"
+        ) from exc
+    return tuple(ranges)
+
+
 @dataclass(frozen=True)
 class Config:
     # ── 实例标识 ──────────────────────────────────────────────────────────────
@@ -161,6 +185,10 @@ class Config:
     screener_max_days_to_expiry: float = float(os.environ.get("SCREENER_MAX_DAYS_TO_EXPIRY", "inf"))
     screener_min_midpoint: float = float(os.environ.get("SCREENER_MIN_MIDPOINT", "0.15"))
     screener_max_midpoint: float = float(os.environ.get("SCREENER_MAX_MIDPOINT", "0.85"))
+    # 多区间取并集并包含端点；非空时替代上面的 MIN/MAX，空时保持原有行为。
+    screener_midpoint_ranges: tuple[tuple[float, float], ...] = field(
+        default_factory=_load_screener_midpoint_ranges
+    )
     screener_min_size_lower: float = float(os.environ.get("SCREENER_MIN_SIZE_LOWER", "0.0"))
     screener_min_size_upper: float = float(os.environ.get("SCREENER_MIN_SIZE_UPPER", "60"))
     screener_min_existing_size: float = float(os.environ.get("SCREENER_MIN_EXISTING_SIZE", "2000.0"))

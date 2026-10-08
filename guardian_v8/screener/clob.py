@@ -61,12 +61,15 @@ def _fetch_all_orderbooks(candidates: list[CandidateMarket], cfg) -> dict[str, d
     return all_books
 
 
-def _calc_midpoint(book: dict) -> float:
+def _calc_midpoint(book: dict, *, exact: bool = False) -> float:
     bids = book["bids"]
     asks = book["asks"]
     best_bid = max(b["price"] for b in bids) if bids else None
     best_ask = min(a["price"] for a in asks) if asks else None
     if best_bid is not None and best_ask is not None:
+        if exact:
+            # 多区间包含端点：避免 (0.85 + 0.95) / 2 得到 0.899999... 而误排除。
+            return float((Decimal(str(best_bid)) + Decimal(str(best_ask))) / 2)
         return (best_bid + best_ask) / 2
     if best_bid is not None:
         return best_bid
@@ -100,8 +103,12 @@ def _score_market(market: CandidateMarket, books: dict[str, dict], cfg) -> Score
             if not tick.is_finite() or tick != required_tick:
                 return None
 
-    midpoint = _calc_midpoint(yes_book)
-    if midpoint < cfg.screener_min_midpoint or midpoint > cfg.screener_max_midpoint:
+    midpoint_ranges = getattr(cfg, "screener_midpoint_ranges", ())
+    midpoint = _calc_midpoint(yes_book, exact=bool(midpoint_ranges))
+    if midpoint_ranges:
+        if not any(lower <= midpoint <= upper for lower, upper in midpoint_ranges):
+            return None
+    elif midpoint < cfg.screener_min_midpoint or midpoint > cfg.screener_max_midpoint:
         return None
 
     yes_lower = midpoint - market.max_spread
