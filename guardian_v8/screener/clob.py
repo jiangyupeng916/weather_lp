@@ -1,5 +1,6 @@
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from decimal import Decimal, InvalidOperation
 
 import requests
 
@@ -22,6 +23,7 @@ def _fetch_orderbooks_batch(token_ids: list[str], cfg, retries: int = 5) -> dict
             for item in resp.json():
                 tid = item.get("asset_id", "")
                 books[tid] = {
+                    "tick_size": item.get("tick_size"),
                     "bids": [
                         {"price": float(b["price"]), "size": float(b["size"])}
                         for b in item.get("bids", [])
@@ -86,6 +88,17 @@ def _score_market(market: CandidateMarket, books: dict[str, dict], cfg) -> Score
     no_book = books.get(market.no_token_id)
     if yes_book is None or no_book is None:
         return None
+
+    required_tick = getattr(cfg, "screener_tick_size", None)
+    if required_tick is not None:
+        # 筛选市场而非单个方向；任一方向的步长未知或不匹配都排除。
+        for book in (yes_book, no_book):
+            try:
+                tick = Decimal(str(book.get("tick_size")))
+            except InvalidOperation:
+                return None
+            if not tick.is_finite() or tick != required_tick:
+                return None
 
     midpoint = _calc_midpoint(yes_book)
     if midpoint < cfg.screener_min_midpoint or midpoint > cfg.screener_max_midpoint:

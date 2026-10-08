@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 
@@ -17,6 +17,27 @@ def load_config(env_file: str = ".env") -> None:
         _load(env_file)
     elif env_file != ".env" and os.path.exists(".env"):
         _load(".env")  # 回退到默认 .env
+
+
+def _load_screener_tick_size() -> Optional[Decimal]:
+    """空值关闭筛选；非空值必须是支持的最小价格步长。"""
+    raw = os.environ.get("SCREENER_TICK_SIZE", "").strip()
+    if not raw:
+        return None
+    message = (
+        f"SCREENER_TICK_SIZE 取值非法 {raw!r}：留空关闭，或填写 "
+        "0.1/0.01/0.005/0.0025/0.001/0.0001"
+    )
+    try:
+        tick = Decimal(raw)
+    except InvalidOperation as exc:
+        raise EnvironmentError(message) from exc
+    allowed = tuple(Decimal(value) for value in (
+        "0.1", "0.01", "0.005", "0.0025", "0.001", "0.0001",
+    ))
+    if not tick.is_finite() or tick not in allowed:
+        raise EnvironmentError(message)
+    return tick
 
 
 @dataclass(frozen=True)
@@ -169,6 +190,10 @@ class Config:
     # 只过滤最终挂单（targets），不影响评分/排序/CSV（CSV 仍展示两方向完整信息）。
     # 切换方向后，反方向的旧挂单会在下一轮筛选被撤（_apply_market_targets 移除逻辑）。
     screener_outcome: str = os.environ.get("SCREENER_OUTCOME", "both").lower()
+
+    # 最小价格步长筛选：默认关闭；如 0.001 要求 YES/NO 的当前步长均恰好等于该值。
+    # 使用每轮 /books 的 tick_size，不使用执行层 tick_size 的默认值。
+    screener_tick_size: Optional[Decimal] = field(default_factory=_load_screener_tick_size)
 
     # ── 缓存与并发 ────────────────────────────────────────────────────────────
     cache_ttl: float = 5.0
