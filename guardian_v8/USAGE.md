@@ -52,7 +52,7 @@ cd weather_lp/guardian_v8
 **方式一：本地传输**（Windows PowerShell）
 
 ```powershell
-scp D:\cursor\guardian\guardian_v7\.env.bot1 root@217.60.38.228:/root/weather_lp/guardian_v8/
+scp D:\cursor\guardian\guardian_v7\.env.bot1 root@95.182.100.162:/root/weather_lp/guardian_v8/
 ```
 
 **方式二：服务器直接创建**
