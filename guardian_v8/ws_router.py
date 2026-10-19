@@ -31,6 +31,12 @@ class WSRouter:
         self._route_user(data)
 
     def _route_user(self, data: dict):
+        if isinstance(data, list):
+            for item in data:
+                self._route_user(item)
+            return
+        if not isinstance(data, dict):
+            return
         etype = data.get("event_type", "")
         mtype = data.get("type", "")
 

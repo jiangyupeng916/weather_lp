@@ -54,3 +54,6 @@ nohup.out
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Durable trading state / signed hedge orders (never commit or delete on restart)
+/guardian_v8/data/hedge_exit/

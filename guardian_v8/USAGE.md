@@ -160,6 +160,14 @@ SCREENER_TICK_SIZE=0.001
 
 修改 env 后重启对应实例；启动日志会显示实际使用的价格区间。
 
+### 3.5 成交后的反向买入与合并（可选）
+
+新增 `EXIT_MODE=hedge_merge`：BUY 成交确认后买入同市场相反 outcome 的净缺口份额，再合并等量 YES/NO；默认 `EXIT_MODE=sell` 保持原卖出方式。`SELL_MIN_BID_GAP` / `SELL_POSITION_GAP` 自动按 `1 − 成本 + gap` 转成买价保护上限。
+
+首次启用须先处理遗留持仓和旧卖单，补齐 Relayer 凭据，并安装更新后的依赖。之后重启保留并使用 `data/hedge_exit/<钱包>.json` 恢复。不要删除此状态文件，未完成退出时不能直接切回 sell。
+
+完整参数、示例、超时退出差异与故障恢复见 [HEDGE_EXIT.md](HEDGE_EXIT.md)。只读查看进度：`python hedge_status.py`。
+
 ## 4. 多账户运行（bot1 + bot2）
 
 Guardian V8 支持**同时运行多个账户**，每个账户是完全独立的实例：读各自的 `.env.<instance>` 凭据，写各自的 `data/<instance>/` 日志与状态，互不共享内存、互不干扰。

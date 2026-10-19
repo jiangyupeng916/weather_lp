@@ -37,6 +37,7 @@ from ws_router import WSRouter
 from scheduler import PeriodicScheduler
 from background import BackgroundDispatcher
 from wss import BidCache, MarketWS
+from hedge_exit import HedgeExit, ensure_sell_safe
 
 logger = logging.getLogger("guardian")
 
@@ -134,6 +135,20 @@ class Guardian:
         self._processed_trades: Dict[str, float] = {}
         self._trade_lock = threading.Lock()
 
+        # One durable journal per wallet, shared across instance names. The exit
+        # worker owns its state; reward market state remains main-thread-only.
+        hedge_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "data", "hedge_exit", f"{self.address.lower()}.json")
+        self.hedge_exit = None
+        if self.cfg.exit_mode == "hedge_merge":
+            self.hedge_exit = HedgeExit(self.client, self.cfg, hedge_path,
+                                        self.exec_layer._rate_wait, self.trade_logger,
+                                        maker_busy=self.exec_layer.maker_busy)
+            self.exec_layer.place_guard = lambda token: self.running and not self._hedge_blocks(token)
+            self.exec_layer.exit_order_owned = self.hedge_exit.owns
+        else:
+            ensure_sell_safe(hedge_path)
+
         # ── 缓存 ──────────────────────────────────────────────────────────────
         self._cache_lock = threading.RLock()
         self._market_info: Dict[str, dict] = {}
@@ -164,6 +179,7 @@ class Guardian:
         logger.info("超时强平: %s | max_hold=%.1fh",
                     "启用" if self.cfg.max_hold_enabled else "关闭",
                     self.cfg.max_hold_hours)
+        logger.info("成交退出模式: %s", self.cfg.exit_mode)
         logger.info("=" * 60)
 
     # ── 信号处理 ──────────────────────────────────────────────────────────────
@@ -341,10 +357,31 @@ class Guardian:
                 ms.state_at = time.time()
 
     # ── 挂单动作（异步两步） ──────────────────────────────────────────────────
+    def _hedge_blocks(self, token_id):
+        engine = getattr(self, "hedge_exit", None)
+        return engine is not None and engine.blocks(token_id)
+
+    def _reward_orders(self, orders):
+        engine = getattr(self, "hedge_exit", None)
+        if engine is None:
+            return orders
+        return [o for o in orders if not engine.owns(o.order_id)]
+
+    def _pause_hedge_markets(self):
+        if getattr(self, "hedge_exit", None) is None:
+            return
+        for token_id, ms in list(self._markets.items()):
+            if (self._hedge_blocks(token_id) and ms.active_id
+                    and ms.state is ActorState.RESTING and not self._has_pending_op(token_id)):
+                self._trigger_cancel(token_id, "hedge exit in progress")
+
     def _trigger_place(self, token_id: str):
         """Step 1: 异步获取订单簿，避免 GET /book 阻塞主循环。"""
         ms = self._markets.get(token_id)
         if not ms:
+            return
+        if self._hedge_blocks(token_id):
+            self._start_cooldown(ms, 5.0)
             return
         ms.state = ActorState.PLACING
         ms.state_at = time.time()
@@ -564,6 +601,9 @@ class Guardian:
             elif op == "target_price":
                 # Step 2: 拿到订单簿价格后，提交实际下单
                 target = result
+                if self._hedge_blocks(token_id):
+                    self._start_cooldown(ms, 5.0)
+                    continue
                 if target is None:
                     logger.warning("[RETRY] %s bids不足%d档，10s后重试",
                                    token_id[:16], self.cfg.maker_rank)
@@ -780,6 +820,7 @@ class Guardian:
 
     def _apply_discover_result(self, orders):
         """【主线程】应用 discover 结果：清理 STOPPED + 发现新市场 + CSV 同步 + 日志。"""
+        orders = self._reward_orders(orders)
         # 清理 STOPPED 状态市场（主线程独占写 _markets，无锁安全）
         stopped = [tid for tid, ms in self._markets.items() if ms.state == ActorState.STOPPED]
         for tid in stopped:
@@ -1170,6 +1211,7 @@ class Guardian:
             # API 查询失败，仅处理状态超时，跳过依赖订单列表的检查
             self._audit_timeouts_only()
             return
+        orders = self._reward_orders(orders)
         order_map = {o.order_id: o for o in orders}
         buys = [o for o in orders if o.side.upper() == "BUY"]
         now = time.time()
@@ -1321,6 +1363,10 @@ class Guardian:
 
     # ── 交易处理 ──────────────────────────────────────────────────────────────
     def handle_trade(self, data: dict):
+        engine = getattr(self, "hedge_exit", None)
+        if engine is not None:
+            engine.notify(data)
+            return
         tid = data.get("id", "")
         status = str(data.get("status", "")).upper()
 
@@ -1393,6 +1439,10 @@ class Guardian:
 
     # ── 持仓兜底 ──────────────────────────────────────────────────────────────
     def check_positions(self):
+        engine = getattr(self, "hedge_exit", None)
+        if engine is not None:
+            engine.wake.set()
+            return
         pos_list = self.positions()
 
         # ── 持仓首见计时维护（V8.4 超时强平）──────────────────────────────────
@@ -1692,6 +1742,9 @@ class Guardian:
         # 1. 先启动心跳（在发现任何订单之前）
         self.heartbeat.start()
 
+        if self.hedge_exit is not None:
+            self.hedge_exit.start()
+
         # 2. 启动 WebSocket
         self.ws_manager.start()
 
@@ -1785,6 +1838,7 @@ class Guardian:
                 self._process_ws_trades()         # 消费 WS 成交事件（RANK=1 有成交就撤单）
                 self._check_cooldowns(now)
                 self._check_pending_ops(now)      # 回写撤单/挂单结果
+                self._pause_hedge_markets()       # 退出中的两种 token 暂停奖励挂单
                 self._check_pending_sells()       # 消费 BUY 成交即时卖单队列
                 self._drain_background(bg_handlers)  # 应用后台任务结果（主线程写 _markets）
             except Exception as e:
@@ -1815,6 +1869,12 @@ class Guardian:
 
     def _shutdown(self):
         logger.info("开始优雅关闭...")
+        self.running = False
+
+        # Stop hedge submissions BEFORE global cancellation. Its journal remains
+        # available for settlement/merge reconciliation on the next startup.
+        if getattr(self, "hedge_exit", None) is not None:
+            self.hedge_exit.stop()
 
         # 停止后台调度器（纯计算任务，不必等待收尾）
         self._bg.shutdown(wait=False)
@@ -1825,19 +1885,26 @@ class Guardian:
             self._market_ws.join(timeout=3.0)
 
         # 一次 API 调用取消所有活跃订单
-        fut = self.exec_layer.cancel_all("系统关闭")
-        try:
-            fut.result(timeout=self.cfg.cancel_timeout)
-        except Exception:
-            pass
+        if getattr(self, "hedge_exit", None) is not None:
+            self.exec_layer.drain_and_cancel_all("系统关闭")
+        else:
+            fut = self.exec_layer.cancel_all("系统关闭")
+            try:
+                fut.result(timeout=self.cfg.cancel_timeout)
+            except Exception:
+                pass
 
         # 停止 WebSocket
         self.ws_manager.stop()
 
         # 停止执行层线程池
-        self.exec_layer.shutdown(wait=True)
+        if getattr(self, "hedge_exit", None) is None:
+            self.exec_layer.shutdown(wait=True)
 
         # 最后停止心跳（订单已取消后）
         self.heartbeat.stop()
+
+        if getattr(self, "hedge_exit", None) is not None:
+            self.hedge_exit.close()
 
         logger.info("=" * 60 + "\n系统已停止\n" + "=" * 60)

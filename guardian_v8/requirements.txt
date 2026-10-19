@@ -1,4 +1,4 @@
-polymarket-client
+polymarket-client==0.5.0
 python-dotenv
 requests
 websocket-client

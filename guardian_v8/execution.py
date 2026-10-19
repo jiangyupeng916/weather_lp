@@ -46,12 +46,22 @@ class ExecutionLayer:
         self._lock_place = threading.Lock()
         self._lock_rate = threading.Lock()
         self._last_exec = 0.0
+        self.place_guard = None
+        self.exit_order_owned = None
+        self._maker_inflight: Dict[str, int] = {}
         self._executor = ThreadPoolExecutor(
             max_workers=cfg.max_workers, thread_name_prefix="exec"
         )
 
     def shutdown(self, wait: bool = True):
         self._executor.shutdown(wait=wait)
+
+    def drain_and_cancel_all(self, reason: str):
+        """Shutdown path: finish queued/inflight writes BEFORE the final cancel."""
+        self.shutdown(wait=True)
+        fut = Future()
+        self._do_cancel_all(reason, fut)
+        return fut.result()
 
     def run_async(self, fn, *args, **kwargs) -> Future:
         """在线程池中执行任意函数，返回 Future[result]。
@@ -201,8 +211,25 @@ class ExecutionLayer:
                 return fut
             self._place_tokens[token] = now
 
-        self._executor.submit(self._do_place, asset_id, aligned, size, tick_size, token, fut)
+        with self._lock_place:
+            self._maker_inflight[asset_id] = self._maker_inflight.get(asset_id, 0) + 1
+        self._executor.submit(self._run_place, asset_id, aligned, size, tick_size, token, fut)
         return fut
+
+    def maker_busy(self, tokens) -> bool:
+        with self._lock_place:
+            return any(self._maker_inflight.get(t, 0) for t in tokens)
+
+    def _run_place(self, asset_id, *args):
+        try:
+            self._do_place(asset_id, *args)
+        finally:
+            with self._lock_place:
+                count = self._maker_inflight.get(asset_id, 1) - 1
+                if count:
+                    self._maker_inflight[asset_id] = count
+                else:
+                    self._maker_inflight.pop(asset_id, None)
 
     def _do_place(self, asset_id: str, price: Decimal, size: Decimal,
                   tick_size: Decimal, token: str, fut: Future):
@@ -212,6 +239,11 @@ class ExecutionLayer:
         post_only_rejected = False
         for attempt in range(1, self._cfg.place_retries + 1):
             self._rate_wait()
+            if self.place_guard is not None and not self.place_guard(asset_id):
+                with self._lock_place:
+                    self._place_tokens.pop(token, None)
+                fut.set_result(None)
+                return
             try:
                 # V8: place_limit_order(token_id, side, price, size, post_only)
                 # price/size 传字符串，SDK 内部处理精度
@@ -271,6 +303,8 @@ class ExecutionLayer:
         try:
             for page in pages:
                 for o in page.items:
+                    if self.exit_order_owned is not None and self.exit_order_owned(o.id):
+                        continue
                     if str(o.side).upper() != "BUY":
                         continue
                     if abs(float(o.price) - target) < 1e-9:

@@ -230,6 +230,10 @@ class Config:
     trade_max_size: int = 50000
 
     # ── 持仓卖出阈值 ──────────────────────────────────────────────────────────
+    # sell 保持原行为；hedge_merge 用反向等份额 BUY + 合并退出。
+    exit_mode: str = field(default_factory=lambda: os.environ.get("EXIT_MODE", "sell").strip().lower())
+    hedge_poll_interval: float = field(
+        default_factory=lambda: float(os.environ.get("HEDGE_POLL_INTERVAL", "5")))
     position_threshold: float = 1.0
     # 即时卖单（BUY 成交后立即卖）：best_bid < 成交价 - 此值 → 跳过等定时轮询
     sell_min_bid_gap: Decimal = Decimal(os.environ.get("SELL_MIN_BID_GAP", "0.02"))
@@ -290,6 +294,19 @@ class Config:
 
     def validate(self) -> None:
         """V8.2：只要求 pk；wallet/relayer/proxy 按账户格式可选。"""
+        if self.exit_mode not in ("sell", "hedge_merge"):
+            raise EnvironmentError("EXIT_MODE 只允许 sell / hedge_merge")
+        if not 1 <= self.hedge_poll_interval <= 60:
+            raise EnvironmentError("HEDGE_POLL_INTERVAL 必须在 1～60 秒之间")
+        if self.exit_mode == "hedge_merge":
+            if not (self.relayer_api_key and self.relayer_api_key_address):
+                raise EnvironmentError("hedge_merge 需要 RELAYER_API_KEY 和 RELAYER_API_KEY_ADDRESS 用于合并")
+            for name, gap in (("SELL_MIN_BID_GAP", self.sell_min_bid_gap),
+                              ("SELL_POSITION_GAP", self.sell_position_gap)):
+                if not gap.is_finite() or not Decimal(0) <= gap <= Decimal(1):
+                    raise EnvironmentError(f"{name} 必须是 0～1 之间的有限数值")
+            if not 0 < self.max_hold_hours < float("inf"):
+                raise EnvironmentError("MAX_HOLD_HOURS 必须是正的有限数值")
         if not self.pk:
             raise EnvironmentError("缺少环境变量: SIGNER_PRIVATE_KEY / PK（私钥）")
         # 防串号：新旧命名同时存在且内容不同时，不静默选一个，直接报错。
