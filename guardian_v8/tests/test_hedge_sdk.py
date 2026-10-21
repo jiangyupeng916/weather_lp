@@ -21,6 +21,9 @@ V3_EXCHANGE = "0x" + "78" * 20
 ROUTER = "0x" + "9a" * 20
 LEDGER = "0x" + "ab" * 20
 ADAPTER = "0x" + "bc" * 20
+NEG_BALANCE_ADAPTER = "0x" + "cd" * 20
+NEG_MERGE_OPERATOR = "0x" + "de" * 20
+V2_LEDGER = "0x" + "ef" * 20
 # Realistic CTF IDs occupy a different namespace from structured V2 IDs.
 CTF_TOKEN = str((1 << 200) + (1 << 40) + 123456789)
 V2_TOKEN = str((1 << 248) + (42 << 104) + 1)
@@ -42,6 +45,7 @@ def adapter():
                                               neg_risk_exchange=NEG_EXCHANGE,
                                               exchange_v3=V3_EXCHANGE,
                                               protocol_v2_router=ROUTER,
+                                              conditional_tokens=LEDGER,
                                               collateral_token=WALLET)),
                 _resolve_market_position_context=Mock(return_value=NS(
                     protocol="ctf", neg_risk=False, adapter_address=ADAPTER,
@@ -169,11 +173,12 @@ def test_balance_and_approval_select_correct_ledger_and_operator(protocol):
     if protocol == "v2":
         ctx.token_ids = (str(int(V2_TOKEN) - 1), V2_TOKEN)
         ctx.adapter_address = None
+        ctx.position_erc1155_address = V2_LEDGER
     sdk.client._ctx.rpc = NS(eth_call=Mock(return_value="0x" + encode(
         ["uint256[]"], [(20_000_000, 7_000_000)]).hex()))
     assert sdk.balances("condition") == (D(20), D(7))
     params = sdk.client._ctx.rpc.eth_call.call_args.kwargs
-    assert params["to"] == LEDGER
+    assert params["to"] == ctx.position_erc1155_address
     owners, ids = decode(["address[]", "uint256[]"], bytes.fromhex(params["data"][10:]))
     assert owners == (WALLET, WALLET)
     assert ids == tuple(map(int, ctx.token_ids))
@@ -181,6 +186,8 @@ def test_balance_and_approval_select_correct_ledger_and_operator(protocol):
     sdk.client._ctx.rpc.eth_call.return_value = "0x" + encode(["bool"], [True]).hex()
     assert sdk.approved("condition")
     params = sdk.client._ctx.rpc.eth_call.call_args.kwargs
+    approval_ledger = V2_LEDGER if protocol == "v2" else LEDGER
+    assert params["to"] == approval_ledger
     owner, operator = decode(["address", "address"], bytes.fromhex(params["data"][10:]))
     assert owner == WALLET
     expected = ROUTER if protocol == "v2" else ADAPTER
@@ -188,7 +195,49 @@ def test_balance_and_approval_select_correct_ledger_and_operator(protocol):
     sdk.client.approve_erc1155_for_all = Mock()
     sdk.approve("condition")
     sdk.client.approve_erc1155_for_all.assert_called_once_with(
-        token_address=LEDGER, operator_address=expected, approved=True)
+        token_address=approval_ledger, operator_address=expected, approved=True)
+
+
+def test_negative_risk_approval_uses_ctf_ledger_not_balance_adapter():
+    from eth_abi import encode, decode
+    from eth_utils import keccak
+
+    sdk = adapter()
+    ctx = sdk.context("condition")
+    ctx.neg_risk = True
+    ctx.position_erc1155_address = NEG_BALANCE_ADAPTER
+    ctx.adapter_address = NEG_MERGE_OPERATOR
+
+    def query(*, to, data):
+        raw = bytes.fromhex(data[2:])
+        if raw[:4] == keccak(b"balanceOfBatch(address[],uint256[])")[:4]:
+            assert to == NEG_BALANCE_ADAPTER
+            return "0x" + encode(["uint256[]"], [(20_000_000, 20_000_000)]).hex()
+        assert raw[:4] == keccak(b"isApprovedForAll(address,address)")[:4]
+        if to == NEG_BALANCE_ADAPTER:
+            # Reproduced on chain: this adapter forwards balance reads but
+            # reverts on the ERC-1155 operator-approval selector.
+            raise RuntimeError("JSON-RPC eth_call failed: execution reverted")
+        assert to == LEDGER
+        assert decode(["address", "address"], raw[4:]) == (WALLET, NEG_MERGE_OPERATOR)
+        return "0x" + encode(["bool"], [False]).hex()
+
+    sdk.client._ctx.rpc = NS(eth_call=Mock(side_effect=query))
+    assert sdk.balances("condition") == (D(20), D(20))
+    assert sdk.approved("condition") is False
+    sdk.client.approve_erc1155_for_all = Mock()
+    sdk.approve("condition")
+    sdk.client.approve_erc1155_for_all.assert_called_once_with(
+        token_address=LEDGER, operator_address=NEG_MERGE_OPERATOR, approved=True)
+
+
+def test_approval_rpc_failure_identifies_read_target_without_submitting():
+    sdk = adapter()
+    sdk.client._ctx.rpc = NS(eth_call=Mock(side_effect=RuntimeError("execution reverted")))
+    sdk.client.approve_erc1155_for_all = Mock()
+    with pytest.raises(RuntimeError, match=f"Approval query failed:.*ledger={LEDGER}"):
+        sdk.approved("condition")
+    sdk.client.approve_erc1155_for_all.assert_not_called()
 
 
 @pytest.mark.parametrize("protocol", ["ctf", "v2"])

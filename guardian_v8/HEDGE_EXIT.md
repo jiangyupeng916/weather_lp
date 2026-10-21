@@ -56,6 +56,7 @@ python main.py bot1
 - 撤单后，必须核实订单终态及其成交结算，才释放未成交份额。部分成交只补净缺口，不再次购买原始总量。
 - 反向下单前保存签名、预计算订单 ID 和预留份额。响应超时时查询这个订单；若重发，只重发同一签名，不生成新 salt。拒绝响应仅在首次提交结果明确时释放预留。
 - 普通市场与 negative-risk 市场使用 SDK 的市场上下文、token 映射和合并路由；不会把同一事件下不同问题的 YES / NO 错配。合并前查询链上余额和 operator approval，必要时先授权。
+- 授权查询和授权写入使用实际 token ledger：普通及负风险 CTF 均在 Conditional Tokens 上授权对应 collateral adapter，Protocol V2 在 PositionManager 上授权 Router。旧负风险 Adapter 可转发 `balanceOfBatch`，但不能用它调用 `isApprovedForAll` / `setApprovalForAll`；SDK 的余额读取目标不能直接当作授权目标。
 - 合并数量是明确的六位小数基础单位，绝不使用 `amount="max"`。同一钱包同时只允许一笔授权/合并交易在途，等待 Relayer `STATE_CONFIRMED` 后才从账本扣除配对份额。
 - 合并已返回交易 ID 时，重启继续查询同一笔交易；不会重复提交。关闭顺序为停止退出工作线程、等待奖励写请求结束、最后撤单，持久化记录保留用于下次恢复。
 
@@ -92,9 +93,12 @@ grep -E 'HEDGE FILL|HEDGE MERGED' data/bot1/trades.log
 | `HEDGE ORDER UNKNOWN` | 下单结果不明；保留预留，核实同一订单。不会因为一次查不到就新建另一笔。 |
 | `Transaction submission unknown` | 授权/合并请求响应丢失，尚无可核对的交易 ID。该市场停止继续买入/合并；先核实 Relayer 历史、链上交易及余额，再修复记录。单纯重启不会解除，不能靠删除状态“重试”。 |
 | `HEDGE PAUSED` / `HEDGE JOURNAL` | 数据读取或状态保存失败；暂停新奖励挂单。先修复网络、凭据或磁盘问题，再恢复。 |
+| `Approval query failed` | 授权只读查询失败，日志附带 ledger/operator；不会把失败当作“未授权”并盲目发送交易。旧版在负风险 CTF 市场可能把授权查到 Neg Risk Adapter 并反复 `eth_call ... execution reverted`，请更新代码、保留状态文件后重启；不需要降级 SDK。 |
 | `Hedge execution exceeds reserved shares` / `inventory conflict` | 实际执行与账本不一致；冻结该市场，不用反向循环买入掩盖差额。需核对外部交易。 |
 
 小于最小下单量的残余、市场关闭、资金不足、接口故障都可能使自动退出停留在等待状态。该版本不会为了强行完成合并而多买另一边。
+
+2026-10-21 负风险市场授权查询修复前的完整代码保存在 Git 提交 `1237400`。修复经过公开 Polygon RPC 的只读调用复现：同一负风险市场的 `balanceOfBatch` 在旧 Adapter 与 CTF 均可返回，但 `isApprovedForAll` 在旧 Adapter 会 revert、在 CTF 正常返回布尔值。修复同时覆盖授权读取与写入，未提交实盘授权或合并交易，恢复时不需要删除或修改 journal。
 
 如需回退，在所有退出任务完成、没有在途交易及残余持仓后设置 `EXIT_MODE=sell` 并重启。若账本仍有未完成任务，程序会拒绝切回旧卖出模式，防止把已预留用于合并的份额卖掉。
 

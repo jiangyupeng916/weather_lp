@@ -43,19 +43,42 @@ class HedgeSDK:
     def approved(self, condition):
         from polymarket._internal.actions.relayer.calls import (
             erc1155_is_approved_for_all_call, decode_erc1155_is_approved_for_all_result)
-        ctx = self.context(condition)
+        ledger = self._approval_ledger(condition)
+        operator = self._operator(condition)
         call = erc1155_is_approved_for_all_call(
-            token_address=ctx.position_erc1155_address,
-            owner=self.client.wallet, operator=self._operator(condition))
+            token_address=ledger, owner=self.client.wallet, operator=operator)
+        try:
+            result = self.client._ctx.rpc.eth_call(to=str(call.to), data=call.data)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Approval query failed: condition={condition} ledger={ledger} "
+                f"operator={operator} | {exc}") from exc
         return decode_erc1155_is_approved_for_all_result(
-            self.client._ctx.rpc.eth_call(to=str(call.to), data=call.data))
+            result)
 
     def approve(self, condition):
-        ctx = self.context(condition)
+        ledger = self._approval_ledger(condition)
+        operator = self._operator(condition)
         self.rate_wait()
         return self.client.approve_erc1155_for_all(
-            token_address=str(ctx.position_erc1155_address),
-            operator_address=str(self._operator(condition)), approved=True)
+            token_address=str(ledger), operator_address=str(operator), approved=True)
+
+    def _approval_ledger(self, condition):
+        ctx = self.context(condition)
+        protocol = getattr(ctx, "protocol", "ctf")
+        if protocol == "ctf":
+            # The legacy Neg Risk Adapter forwards balanceOfBatch, but does NOT
+            # implement isApprovedForAll/setApprovalForAll. CTF permissions live
+            # on Conditional Tokens even when SDK position balance reads use
+            # the adapter. Do not reuse position_erc1155_address for approvals.
+            ledger = self.client._ctx.environment_config.conditional_tokens
+        elif protocol == "v2" and self.sdk_version == "0.9.0":
+            ledger = ctx.position_erc1155_address
+        else:
+            raise ValueError(f"Unsupported position approval protocol: {protocol}")
+        if not ledger:
+            raise ValueError("Missing position approval ledger")
+        return ledger
 
     def _operator(self, condition):
         ctx = self.context(condition)
