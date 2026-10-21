@@ -1,6 +1,7 @@
-"""Verify the pinned SDK's actual amount, hashing and serialization contracts."""
+"""Verify supported SDKs' actual amount, hashing, routing and serialization."""
 from dataclasses import replace
 from decimal import Decimal as D
+from importlib.metadata import version
 from pathlib import Path
 import sys
 from types import SimpleNamespace as NS
@@ -16,6 +17,14 @@ ZERO32 = "0x" + "00" * 32
 WALLET = "0x" + "12" * 20
 EXCHANGE = "0x" + "34" * 20
 NEG_EXCHANGE = "0x" + "56" * 20
+V3_EXCHANGE = "0x" + "78" * 20
+ROUTER = "0x" + "9a" * 20
+LEDGER = "0x" + "ab" * 20
+ADAPTER = "0x" + "bc" * 20
+# Realistic CTF IDs occupy a different namespace from structured V2 IDs.
+CTF_TOKEN = str((1 << 200) + (1 << 40) + 123456789)
+V2_TOKEN = str((1 << 248) + (42 << 104) + 1)
+SDK_VERSION = version("polymarket-client")
 
 
 def signed():
@@ -23,28 +32,33 @@ def signed():
                        maker_amount=3_200_000, metadata=ZERO32, order_type="GTC", salt=12345,
                        side="BUY", signature="0x" + "00" * 65, signature_type=3,
                        signer=WALLET, taker_amount=20_000_000, timestamp=1_000_000,
-                       token_id="123456789", post_only=False)
+                       token_id=CTF_TOKEN, post_only=False)
 
 
 def adapter():
-    client = NS(create_limit_order=Mock(return_value=signed()),
+    client = NS(wallet=WALLET, create_limit_order=Mock(return_value=signed()),
                 merge_positions=Mock(), post_order=Mock(),
                 _ctx=NS(environment_config=NS(chain_id=137, standard_exchange=EXCHANGE,
-                                              neg_risk_exchange=NEG_EXCHANGE)),
-                _resolve_market_position_context=Mock(return_value=NS(neg_risk=False)))
+                                              neg_risk_exchange=NEG_EXCHANGE,
+                                              exchange_v3=V3_EXCHANGE,
+                                              protocol_v2_router=ROUTER,
+                                              collateral_token=WALLET)),
+                _resolve_market_position_context=Mock(return_value=NS(
+                    protocol="ctf", neg_risk=False, adapter_address=ADAPTER,
+                    position_erc1155_address=LEDGER, token_ids=(CTF_TOKEN, str(int(CTF_TOKEN) + 1)))))
     return HedgeSDK(client, Mock())
 
 
 def test_limit_buy_and_forced_exit_keep_explicit_share_quantity():
     sdk = adapter()
     for forced in (False, True):
-        data, oid = sdk.prepare("condition", "123456789", D("0.16"), D(20), False, forced)
+        data, oid = sdk.prepare("condition", CTF_TOKEN, D("0.16"), D(20), False, forced)
         assert data["taker_amount"] == 20_000_000
         assert data["maker_amount"] == 3_200_000
         assert data["order_type"] == "GTC"
         assert len(oid) == 66
     sdk.client.create_limit_order.assert_called_with(
-        token_id="123456789", side="BUY", price="0.16", size="20", post_only=False)
+        token_id=CTF_TOKEN, side="BUY", price="0.16", size="20", post_only=False)
 
 
 def test_sdk_amount_math_uses_shares_not_usd_across_all_supported_ticks():
@@ -68,7 +82,7 @@ def test_order_hash_matches_independent_eip712_encoder_and_neg_risk_domain():
               ("metadata", "bytes32"), ("builder", "bytes32")]
     domain = dict(name="Polymarket CTF Exchange", version="2", chainId=137,
                   verifyingContract=EXCHANGE)
-    message = dict(salt=12345, maker=WALLET, signer=WALLET, tokenId=123456789,
+    message = dict(salt=12345, maker=WALLET, signer=WALLET, tokenId=int(CTF_TOKEN),
                    makerAmount=3_200_000, takerAmount=20_000_000, side=0,
                    signatureType=3, timestamp=1_000_000, metadata=ZERO32, builder=ZERO32)
     signable = encode_typed_data(domain_data=domain,
@@ -85,7 +99,7 @@ def test_persisted_signed_order_round_trip_keeps_identical_wire_request():
     import json
     from polymarket._internal.actions.orders.post import build_post_order_request
     sdk = adapter()
-    data, _ = sdk.prepare("condition", "123456789", D("0.16"), D(20), False, False)
+    data, _ = sdk.prepare("condition", CTF_TOKEN, D("0.16"), D(20), False, False)
     recovered = json.loads(json.dumps(data))
     sdk.post(recovered)
     reposted = sdk.client.post_order.call_args.args[0]
@@ -103,11 +117,112 @@ def test_reject_sdk_size_change_before_submission():
     sdk = adapter()
     sdk.client.create_limit_order.return_value = replace(signed(), taker_amount=21_000_000)
     with pytest.raises(ValueError, match="share quantity"):
-        sdk.prepare("condition", "123456789", D("0.16"), D(20), False, False)
+        sdk.prepare("condition", CTF_TOKEN, D("0.16"), D(20), False, False)
     sdk.client.post_order.assert_not_called()
 
 
 def test_unknown_sdk_version_fails_before_trading(monkeypatch):
     monkeypatch.setattr("hedge_sdk.version", lambda _: "0.6.0")
-    with pytest.raises(RuntimeError, match="0.5.0"):
+    with pytest.raises(RuntimeError, match="installed 0.6.0"):
         adapter()
+
+
+@pytest.mark.skipif(SDK_VERSION != "0.9.0", reason="Protocol V2 routing added in SDK 0.9.0")
+def test_v2_order_hash_matches_sdk_unsigned_order_domain_and_independent_encoder():
+    from eth_account.messages import encode_typed_data
+    from eth_utils import keccak
+    from polymarket._internal.actions.orders.context import resolve_order_exchange_address
+    from polymarket._internal.actions.orders.orders import create_unsigned_order, create_signed_order
+    from polymarket._internal.actions.orders.types import OrderDraft
+    from polymarket._internal.actions.orders.typed_data import build_order_typed_data
+
+    sdk = adapter()
+    sdk.contexts["v2"] = NS(protocol="v2", neg_risk=None)
+    env = sdk.client._ctx.environment_config
+    draft = OrderDraft(chain_id=137, exchange_address=resolve_order_exchange_address(
+        env, asset_id=V2_TOKEN, neg_risk=False), expiration=0, funder_address=WALLET,
+        offered_amount=3_200_000, order_type="GTC", side="BUY", signer=WALLET,
+        requested_amount=20_000_000, asset_id=V2_TOKEN)
+    unsigned = create_unsigned_order(draft, wallet=WALLET, wallet_type="EOA")
+    signed_order = create_signed_order(unsigned, "0x" + "00" * 65)
+    typed_data = build_order_typed_data(unsigned)
+    assert typed_data["domain"]["version"] == "3"
+    assert typed_data["domain"]["verifyingContract"] == V3_EXCHANGE
+    signable = encode_typed_data(full_message=typed_data)
+    expected = "0x" + keccak(b"\x19" + signable.version + signable.header + signable.body).hex()
+    assert sdk.order_id("v2", signed_order) == expected
+    # The legacy domain would generate the wrong durable order ID after a timeout.
+    typed_data["domain"]["version"] = "2"
+    wrong = encode_typed_data(full_message=typed_data)
+    assert expected != "0x" + keccak(b"\x19" + wrong.version + wrong.header + wrong.body).hex()
+
+
+@pytest.mark.parametrize("protocol", ["ctf", "v2"])
+def test_balance_and_approval_select_correct_ledger_and_operator(protocol):
+    if protocol == "v2" and SDK_VERSION != "0.9.0":
+        pytest.skip("Protocol V2 positions require SDK 0.9.0")
+    from eth_abi import encode, decode
+
+    sdk = adapter()
+    ctx = sdk.context("condition")
+    ctx.protocol = protocol
+    if protocol == "v2":
+        ctx.token_ids = (str(int(V2_TOKEN) - 1), V2_TOKEN)
+        ctx.adapter_address = None
+    sdk.client._ctx.rpc = NS(eth_call=Mock(return_value="0x" + encode(
+        ["uint256[]"], [(20_000_000, 7_000_000)]).hex()))
+    assert sdk.balances("condition") == (D(20), D(7))
+    params = sdk.client._ctx.rpc.eth_call.call_args.kwargs
+    assert params["to"] == LEDGER
+    owners, ids = decode(["address[]", "uint256[]"], bytes.fromhex(params["data"][10:]))
+    assert owners == (WALLET, WALLET)
+    assert ids == tuple(map(int, ctx.token_ids))
+
+    sdk.client._ctx.rpc.eth_call.return_value = "0x" + encode(["bool"], [True]).hex()
+    assert sdk.approved("condition")
+    params = sdk.client._ctx.rpc.eth_call.call_args.kwargs
+    owner, operator = decode(["address", "address"], bytes.fromhex(params["data"][10:]))
+    assert owner == WALLET
+    expected = ROUTER if protocol == "v2" else ADAPTER
+    assert operator == expected
+    sdk.client.approve_erc1155_for_all = Mock()
+    sdk.approve("condition")
+    sdk.client.approve_erc1155_for_all.assert_called_once_with(
+        token_address=LEDGER, operator_address=expected, approved=True)
+
+
+@pytest.mark.parametrize("protocol", ["ctf", "v2"])
+def test_actual_sdk_merge_routes_exact_amount_without_live_rpc(protocol):
+    if protocol == "v2" and SDK_VERSION != "0.9.0":
+        pytest.skip("Protocol V2 positions require SDK 0.9.0")
+    from eth_abi import encode, decode
+    from eth_utils import keccak
+    from polymarket import SecureClient
+
+    sdk = adapter()
+    ctx = sdk.context("condition")
+    ctx.protocol = protocol
+    ctx.condition_id = "0x" + "12" * (31 if protocol == "v2" else 32)
+    if protocol == "v2":
+        ctx.token_ids = (str(int(V2_TOKEN) - 1), V2_TOKEN)
+        ctx.adapter_address = None
+    sdk.client._ctx.wallet = WALLET
+    sdk.client._ctx.rpc = NS(eth_call=Mock(return_value="0x" + encode(
+        ["uint256[]"], [(20_000_000, 20_000_000)]).hex()))
+    sdk.client._dispatch_single_call = Mock()
+    sdk.client.merge_positions = lambda **kwargs: SecureClient.merge_positions(sdk.client, **kwargs)
+    sdk.merge("condition", D("12.345678"))
+    call = sdk.client._dispatch_single_call.call_args.args[0]
+    raw = bytes.fromhex(call.data[2:])
+    if protocol == "v2":
+        assert call.to == ROUTER
+        assert raw[:4] == keccak(b"merge(bytes31,uint256)")[:4]
+        condition, amount = decode(["bytes31", "uint256"], raw[4:])
+    else:
+        assert call.to == ADAPTER
+        assert raw[:4] == keccak(b"mergePositions(address,bytes32,bytes32,uint256[],uint256)")[:4]
+        _, _, condition, partition, amount = decode(
+            ["address", "bytes32", "bytes32", "uint256[]", "uint256"], raw[4:])
+        assert partition == (1, 2)
+    assert condition.hex() == ctx.condition_id[2:]
+    assert amount == 12_345_678

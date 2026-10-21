@@ -1,4 +1,4 @@
-"""SDK 0.5.0 adapter for share-exact hedge orders and recoverable merge polling.
+"""SDK 0.5.0 / 0.9.0 adapter for share-exact orders and recoverable merges.
 
 Private SDK helpers are confined here and version-checked. They are the SAME
 ABI, exchange domain and position routing used by SecureClient, not hardcoded
@@ -11,8 +11,11 @@ from importlib.metadata import version
 
 class HedgeSDK:
     def __init__(self, client, rate_wait):
-        if version("polymarket-client") != "0.5.0":
-            raise RuntimeError("hedge_merge requires polymarket-client==0.5.0; see HEDGE_EXIT.md")
+        self.sdk_version = version("polymarket-client")
+        if self.sdk_version not in ("0.5.0", "0.9.0"):
+            raise RuntimeError(
+                f"hedge_merge supports polymarket-client 0.5.0 / 0.9.0; "
+                f"installed {self.sdk_version}; see HEDGE_EXIT.md")
         self.client = client
         self.rate_wait = rate_wait
         self.contexts = {}
@@ -43,7 +46,7 @@ class HedgeSDK:
         ctx = self.context(condition)
         call = erc1155_is_approved_for_all_call(
             token_address=ctx.position_erc1155_address,
-            owner=self.client.wallet, operator=ctx.adapter_address)
+            owner=self.client.wallet, operator=self._operator(condition))
         return decode_erc1155_is_approved_for_all_result(
             self.client._ctx.rpc.eth_call(to=str(call.to), data=call.data))
 
@@ -52,7 +55,20 @@ class HedgeSDK:
         self.rate_wait()
         return self.client.approve_erc1155_for_all(
             token_address=str(ctx.position_erc1155_address),
-            operator_address=str(ctx.adapter_address), approved=True)
+            operator_address=str(self._operator(condition)), approved=True)
+
+    def _operator(self, condition):
+        ctx = self.context(condition)
+        protocol = getattr(ctx, "protocol", "ctf")
+        if protocol == "v2" and self.sdk_version == "0.9.0":
+            operator = self.client._ctx.environment_config.protocol_v2_router
+        elif protocol == "ctf":
+            operator = ctx.adapter_address
+        else:
+            raise ValueError(f"Unsupported position protocol: {protocol}")
+        if not operator:
+            raise ValueError("Missing position approval operator")
+        return operator
 
     def prepare(self, condition, token, price, shares, passive, forced):
         signed = self.client.create_limit_order(
@@ -75,10 +91,23 @@ class HedgeSDK:
         values.pop("signature")
         values.pop("post_only")
         env = self.client._ctx.environment_config
+        protocol_version = _PROTOCOL_VERSION
+        extra = {}
+        if self.sdk_version == "0.9.0":
+            # Match SDK 0.9.0's create_unsigned_order / limit-order routing.
+            # Protocol V2 outcomes use Exchange V3 and EIP-712 version 3.
+            from polymarket._internal.actions.orders.context import resolve_order_exchange_address
+            from polymarket._internal.protocol import is_v2_position_id
+            exchange = resolve_order_exchange_address(
+                env, asset_id=signed.token_id, neg_risk=bool(self.context(condition).neg_risk))
+            protocol_version = "3" if is_v2_position_id(signed.token_id) else "2"
+            extra["protocol_version"] = protocol_version
+        else:
+            exchange = resolve_exchange_address(env, self.context(condition).neg_risk)
         unsigned = UnsignedOrder(
             **values, chain_id=env.chain_id,
-            exchange_address=resolve_exchange_address(env, self.context(condition).neg_risk))
-        domain = bytes.fromhex(_app_domain_separator(unsigned, protocol_version=_PROTOCOL_VERSION)[2:])
+            exchange_address=exchange, **extra)
+        domain = bytes.fromhex(_app_domain_separator(unsigned, protocol_version=protocol_version)[2:])
         return "0x" + keccak(b"\x19\x01" + domain + _order_contents_hash(unsigned)).hex()
 
     def post(self, signed):

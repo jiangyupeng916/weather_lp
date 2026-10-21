@@ -25,7 +25,7 @@
 ## 2. 启用
 
 1. 用原 `sell` 模式处理遗留持仓和旧卖单，再停止实例。首次切换时不能带旧持仓：延迟的持仓快照与历史成交重播无法直接相加，否则可能重复买入。检测到旧仓或未结算交易时，新模式暂停，不会默默接管。
-2. 更新代码及依赖。适配器按本地核验的 `polymarket-client==0.5.0` 编写，依赖文件固定该版本；其他版本会在新模式启动时明确拒绝运行。
+2. 更新代码及依赖。当前安装依赖为 `polymarket-client==0.9.0`，服务器已经是 `0.9.0` 时无需降级。适配器也保留已核验的 `0.5.0` 兼容路径；其他未经验证的版本会在新模式启动时明确拒绝运行。此前仅允许 `0.5.0` 的版本检查已修正，不要手动删除检查来绕过适配。
 3. 在对应 `.env.botN` 添加：
 
 ```dotenv
@@ -44,7 +44,7 @@ python -m pip install -r requirements.txt
 python main.py bot1
 ```
 
-不要同时用另一个机器人、另一台服务器或手动交易控制同一个钱包的退出仓位。此版本按 SDK 0.5.0 的普通 CTF / negative-risk CTF 路由执行；新版 Polymarket Protocol V2 的支持不在本次 SDK 适配范围内，不能仅改签名版本或硬编码合约地址接入。
+不要同时用另一个机器人、另一台服务器或手动交易控制同一个钱包的退出仓位。SDK `0.5.0` 使用普通 CTF / negative-risk CTF 路由；SDK `0.9.0` 额外支持其市场上下文识别的普通 Polymarket Protocol V2 市场。新协议订单使用 SDK 的 Exchange V3 路由及 EIP-712 version 3，授权对象为 SDK 配置的 Router；旧 CTF 订单仍使用对应 Exchange 及 version 2、合并授权仍给 collateral adapter。调用地址、token 配对和合并编码均由相应 SDK 获取，不硬编码生产合约地址，不自行拼接跨市场或 Combo 组合。
 
 `CONFIRMED` 触发后不用等原 token 的 CLOB 余额同步。只有**合并**需要等待两边真实链上余额；`MATCHED` 可能永久 FAILED，因此本实现不会在 MATCHED 阶段提前冒险对冲。WS 事件唤醒工作线程，REST 默认每 5 秒补查；网络、撤单确认和同市场待结算成交仍可能带来延迟。
 
@@ -100,12 +100,13 @@ grep -E 'HEDGE FILL|HEDGE MERGED' data/bot1/trades.log
 
 ## 5. 实现依据与验证
 
-本次通过 Polymarket 文档 MCP 查询，并逐项对照已安装 SDK 的源码、模型、ABI 编解码和签名字段。文档新版的 `asset_id` 与本项目 SDK 0.5.0 的 `token_id` 命名存在差异，实际调用以固定 SDK 的签名为准。
+本次通过 Polymarket 文档 MCP 查询，并逐项对照 SDK `0.5.0`、`0.9.0` 的源码、模型、ABI 编解码和签名字段。`0.9.0` 增加协议中立的 `asset_id`，旧的 `token_id`、`market` 别名仍兼容；读取成交时同时支持别名，持久化的签名单按实际 SDK 模型序列化和恢复。兼容性修改前的完整代码已保存在 Git 提交 `c1e9829`。
 
 - [Place Orders](https://docs.polymarket.com/trading/place-orders)：限价单按份额、tick 和数量精度；市价 BUY 按美元预算；费用在买入金额之外计算。
 - [Real-Time Order Updates](https://docs.polymarket.com/trading/realtime-order-updates)：MATCHED / RETRYING / CONFIRMED / FAILED 生命周期，断线后需补查订单和成交。
 - [Manage Positions](https://docs.polymarket.com/trading/positions/manage)：等量 outcome 合并、明确基础单位、授权及确认要求。
 - [Fees](https://docs.polymarket.com/trading/fees)：主动成交费用说明。
+- [SDK Changelog](https://docs.polymarket.com/changelog/sdks)：Python `0.9.0` 的 asset/condition 别名、新协议订单和合并支持。
 
 离线验证命令：
 
@@ -114,4 +115,4 @@ python -m compileall -q config.py guardian.py execution.py ws_router.py hedge_ex
 python -m pytest tests -q
 ```
 
-测试覆盖阈值反转、全部六种 tick、SDK 真实数量转换与 EIP-712 哈希、部分成交、重复/乱序事件、撤单竞态、响应丢失、重启、合并状态、资金不足、最小量、存储故障以及旧模式回归。没有用真实资金验证，不要运行仓库里的 `test_sdk.py` 作为离线测试。
+测试分别在 SDK `0.5.0` 与隔离的 `0.9.0` 环境运行，覆盖阈值反转、全部六种 tick、SDK 真实数量转换与 EIP-712 哈希、链上余额 ABI 解码、CTF / V2 授权对象及 SDK 真实合并调用编码、部分成交、重复/乱序事件、撤单竞态、响应丢失、重启、合并状态、资金不足、最小量、存储故障以及旧模式回归。`0.5.0` 环境跳过只适用于 `0.9.0` 的新协议测试。没有用真实资金验证，不要运行仓库里的 `test_sdk.py` 作为离线测试。
