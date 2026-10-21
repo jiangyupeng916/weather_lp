@@ -1,7 +1,7 @@
 """Durable, single-writer BUY-opposite / MERGE exit state machine.
 
-Only CONFIRMED trade legs change inventory. An accepted/matched order is a
-reservation, not inventory. Network reads failing never mean zero holdings.
+Only CONFIRMED trade legs change inventory. Optional MATCHED triggering uses
+separate provisional source legs; they can never be merged or sold as inventory.
 """
 from __future__ import annotations
 
@@ -89,8 +89,9 @@ def hedge_quote(book, opposite_book, entry, gap, passive=False, forced=False, sh
 
 
 def has_exposure(state):
-    return bool(state.get("pending_trades")) or any(
+    return bool(state.get("pending_trades") or state.get("pending_legs")) or any(
         m.get("order") or m.get("tx") or m.get("blocked") or m.get("draining_orders")
+        or m.get("recover_sell")
         or any(dec(p["qty"]) != 0 for p in m["inventory"].values())
         for m in state.get("markets", {}).values())
 
@@ -121,7 +122,7 @@ class Journal:
         if not self.path.exists():
             return None
         state = json.loads(self.path.read_text(encoding="utf-8"))
-        if state.get("version") != 1:
+        if state.get("version") not in (1, 2):
             raise RuntimeError("Unsupported hedge journal; do not delete the journal")
         return state
 
@@ -173,11 +174,23 @@ class HedgeExit:
             self.journal.close()
             raise RuntimeError("Hedge journal belongs to another wallet")
         self.state = previous if previous and previous.get("enabled") else {
-            "version": 1, "enabled": True, "wallet": self.address,
+            "version": 2, "enabled": True, "wallet": self.address,
             "initialized": False, "since": int(time.time()), "cursor": 0,
             "markets": {}, "seen": {}, "fills": {}, "owned_orders": {},
             "pending_trades": {}, "terminal_trades": {},
         }
+        self.trigger = getattr(cfg, "hedge_trigger", "confirmed")
+        self.state.setdefault("pending_legs", {})
+        if (self.state.get("trigger", "confirmed") != self.trigger
+                and any(p.get("early") for p in self.state["pending_legs"].values())):
+            self.journal.close()
+            raise RuntimeError("Unsettled early hedges: keep HEDGE_TRIGGER=matched until reconciled")
+        # Version 1 inventories, order signatures and dedupe keys are preserved.
+        # Old code rejects version 2 instead of ignoring provisional fills.
+        self.state.update(version=2, trigger=self.trigger)
+        for market in self.state["markets"].values():
+            market.setdefault("recover_sell", False)
+            market.setdefault("sell_immediate", True)
         self.inbox = queue.Queue()
         self.wake = threading.Event()
         self.stopping = threading.Event()
@@ -199,8 +212,16 @@ class HedgeExit:
             raise
         blocked = set()
         for market in self.state["markets"].values():
-            if market["order"] or market["tx"] or market["blocked"] or market["draining_orders"] or any(
+            if market["order"] or market["tx"] or market["blocked"] or market["draining_orders"] or market.get("recover_sell") or any(
                     dec(p["qty"]) > 0 for p in market["inventory"].values()):
+                blocked.update(market["tokens"])
+        for leg in self.state["pending_legs"].values():
+            market = self.state["markets"].get(leg["condition"])
+            if market:
+                blocked.update(market["tokens"])
+        for condition in self.state["pending_trades"].values():
+            market = self.state["markets"].get(condition)
+            if market:
                 blocked.update(market["tokens"])
         with self._snapshot_lock:
             self._blocked_tokens = blocked
@@ -281,8 +302,31 @@ class HedgeExit:
                     token: {"qty": "0", "cost": "0", "first": 0} for token in tokens},
                 "order": None, "tx": None, "blocked": "", "immediate": True,
                 "next_quote": 0, "draining_orders": [],
+                "recover_sell": False, "sell_immediate": True,
             }
         return markets[condition]
+
+    def _positions(self, condition, market):
+        """Effective BUY target only; confirmed inventory remains untouched."""
+        positions = {t: dict(p) for t, p in market["inventory"].items()}
+        for leg in self.state["pending_legs"].values():
+            if leg["condition"] != condition or not leg["early"]:
+                continue
+            inv = positions[leg["token"]]
+            qty = dec(leg["qty"])
+            inv["qty"] = str(dec(inv["qty"]) + qty)
+            inv["cost"] = str(dec(inv["cost"]) + qty * dec(leg["price"]))
+            inv["first"] = min(inv["first"] or leg["first"], leg["first"])
+        return positions
+
+    def _waiting(self, condition, allow_early=False):
+        for tid, cid in self.state["pending_trades"].items():
+            if cid != condition:
+                continue
+            legs = [p for p in self.state["pending_legs"].values() if p["trade"] == tid]
+            if not allow_early or not legs or any(not p["early"] for p in legs):
+                return True
+        return False
 
     def ingest(self, event):
         trade_id = str(value(event, "id", default=""))
@@ -306,29 +350,80 @@ class HedgeExit:
         if status not in ("CONFIRMED", "FAILED"):
             if trade_id in self.state["terminal_trades"]:
                 return  # delayed MATCHED must not resurrect a confirmed trade
+        market = self._market(condition)
+        if self.trigger == "matched" and value(event, "bucket_index") is None:
+            # WS bucket_index is optional; REST supplies it. Do not guess 0:
+            # a later REST bucket could otherwise look like a second source
+            # fill. Leave this trade to the existing REST reconciliation path.
+            if self.state["terminal_trades"].get(trade_id) == status:
+                return
             self.state["pending_trades"][trade_id] = condition
+            if status == "FAILED" and any(p["trade"] == trade_id and p["early"]
+                                          for p in self.state["pending_legs"].values()):
+                # Stop a known early hedge even before REST supplies the bucket
+                # needed to finalize its accounting. Do not keep buying meanwhile.
+                market["recover_sell"], market["sell_immediate"], market["next_quote"] = True, True, 0
             self._persist()
             return
-        self.state["pending_trades"].pop(trade_id, None)
-        self.state["terminal_trades"][trade_id] = status
-        market = self._market(condition)
+        keyed = []
         for order_id, token, side, quantity, price in legs:
             if not order_id or token not in market["tokens"] or side not in ("BUY", "SELL"):
                 raise ValueError("Incomplete or inconsistent owned trade leg")
             if quantity <= 0 or not ZERO < price < ONE:
                 raise ValueError("Invalid fill shares/price")
             key = f"{trade_id}:{value(event, 'bucket_index', default=0)}:{order_id}:{token}:{side}"
+            old = self.state["pending_legs"].get(key)
+            if not old and any(p["trade"] == trade_id and p["order"] == order_id
+                               and p["token"] == token and p["side"] == side
+                               for p in self.state["pending_legs"].values()):
+                market["blocked"] = "Pending trade bucket changed; reconcile account"
+                self._persist()
+                return
+            if old and (old["condition"] != condition or dec(old["qty"]) != quantity
+                        or dec(old["price"]) != price):
+                market["blocked"] = "Pending trade leg changed quantity/price; reconcile account"
+                self._persist()
+                return
+            keyed.append((key, order_id, token, side, quantity, price))
+        if status not in ("CONFIRMED", "FAILED"):
+            self.state["pending_trades"][trade_id] = condition
+            for key, order_id, token, side, quantity, price in keyed:
+                if key in self.state["seen"]:
+                    continue
+                old = self.state["pending_legs"].get(key)
+                early = (self.trigger == "matched" and side == "BUY"
+                         and order_id not in self.state["owned_orders"] and status in (
+                             "MATCHED", "MATCHED_NOT_BROADCASTED", "MINED", "RETRYING"))
+                self.state["pending_legs"][key] = {
+                    "trade": trade_id, "condition": condition, "order": order_id,
+                    "token": token, "side": side, "qty": str(quantity), "price": str(price),
+                    "first": old["first"] if old else time.time(),
+                    "early": early or bool(old and old["early"]),
+                }
+                if early and not old:
+                    market["immediate"], market["next_quote"] = True, 0
+                    log.info("[HEDGE EARLY] trade=%s token=%s shares=%s", trade_id, token, quantity)
+            self._persist()
+            return
+        self.state["terminal_trades"][trade_id] = status
+        for key, order_id, token, side, quantity, price in keyed:
             if key in self.state["seen"]:
                 if self.state["seen"][key] != status:
                     market["blocked"] = "Conflicting terminal trade statuses"
                 continue
+            pending = self.state["pending_legs"].pop(key, None)
             self.state["seen"][key] = status
             totals = self.state["fills"].setdefault(order_id, {"CONFIRMED": "0", "FAILED": "0"})
             totals[status] = str(dec(totals[status]) + quantity)
             if status == "FAILED":
+                if pending and pending["early"]:
+                    market["recover_sell"], market["sell_immediate"], market["next_quote"] = True, True, 0
+                    log.warning("[HEDGE SOURCE FAILED] condition=%s trade=%s; cancel BUY then sell residual",
+                                condition, trade_id)
                 continue
             owned = self.state["owned_orders"].get(order_id)
-            if owned and (token != owned["token"] or dec(totals["CONFIRMED"]) > dec(owned["shares"])):
+            if owned and (token != owned["token"] or side != owned.get("side", "BUY")
+                          or dec(totals["CONFIRMED"]) > dec(owned["shares"])):
                 market["blocked"] = "Hedge execution exceeds reserved shares or wrong token; reconcile account"
             inv = market["inventory"][token]
             old_qty, old_cost = dec(inv["qty"]), dec(inv["cost"])
@@ -336,8 +431,8 @@ class HedgeExit:
                 inv["qty"] = str(old_qty + quantity)
                 inv["cost"] = str(old_cost + price * quantity)
                 if old_qty == 0:
-                    inv["first"] = time.time()
-                if order_id not in self.state["owned_orders"]:
+                    inv["first"] = pending["first"] if pending and pending["early"] else time.time()
+                if order_id not in self.state["owned_orders"] and not (pending and pending["early"]):
                     market["immediate"] = True
                     market["next_quote"] = 0
             elif quantity <= old_qty:
@@ -347,6 +442,10 @@ class HedgeExit:
                 market["blocked"] = "SELL exceeds journal inventory; external activity needs reconciliation"
             self.trade_logger.info("[HEDGE FILL] trade=%s order=%s token=%s side=%s shares=%s price=%s",
                                    trade_id, order_id, token, side, quantity, price)
+        if any(p["trade"] == trade_id for p in self.state["pending_legs"].values()):
+            self.state["pending_trades"][trade_id] = condition
+        else:
+            self.state["pending_trades"].pop(trade_id, None)
         self._persist()
 
     def _poll_trades(self):
@@ -390,21 +489,21 @@ class HedgeExit:
                 if self.fatal:
                     raise
 
-    def _settled(self, remote):
+    def _settled(self, remote, allow_early=False):
         """Reconcile every associated trade before treating cancellation as final."""
         matched = dec(remote.size_matched)
-        totals = self.state["fills"].get(str(remote.id), {"CONFIRMED": "0", "FAILED": "0"})
-        if dec(totals["CONFIRMED"]) + dec(totals["FAILED"]) >= matched:
+        def accounted():
+            totals = self.state["fills"].get(str(remote.id), {"CONFIRMED": "0", "FAILED": "0"})
+            pending = sum((dec(p["qty"]) for p in self.state["pending_legs"].values()
+                           if allow_early and p["early"] and p["order"] == str(remote.id)), ZERO)
+            return dec(totals["CONFIRMED"]) + dec(totals["FAILED"]) + pending
+        if accounted() >= matched:
             return True
-        total = ZERO
         for trade_id in remote.associate_trades:
             for page in self.client.list_account_trades(id=trade_id):
                 for trade in page.items:
                     self.ingest(trade)
-                    if status_of(trade) in ("CONFIRMED", "FAILED"):
-                        total += sum((qty for oid, _, _, qty, _ in own_legs(
-                            trade, self.address, self.owner) if oid == str(remote.id)), ZERO)
-        return total >= matched
+        return accounted() >= matched
 
     def _quiesce(self, condition, market):
         """Stop reward orders on BOTH tokens before a hedge can cross our own book."""
@@ -421,7 +520,7 @@ class HedgeExit:
             remote = self.client.get_order(order_id=oid)
             terminal = str(remote.status).upper() in ("CANCELED", "CANCELLED", "EXPIRED", "UNMATCHED")
             terminal = terminal or dec(remote.size_matched) >= dec(remote.original_size)
-            settled = self._settled(remote)
+            settled = self._settled(remote, allow_early=self.trigger == "matched")
             if not terminal:
                 self.sdk.cancel(oid)
             if not terminal or not settled:
@@ -435,6 +534,10 @@ class HedgeExit:
         if not order:
             return False
         if order["state"] == "prepared":
+            if market.get("recover_sell") and order.get("side", "BUY") == "BUY":
+                market["order"] = None  # prepared was durably saved but never POSTed
+                self._persist()
+                return False
             self._post(market)
             return market["order"] is not None
         try:
@@ -442,10 +545,11 @@ class HedgeExit:
         except Exception:
             # Submission may have succeeded. Replay EXACT signed bytes only;
             # never create a fresh salt/order while the previous one is unknown.
-            if order["state"] == "unknown":
+            if order["state"] == "unknown" and not (
+                    market.get("recover_sell") and order.get("side", "BUY") == "BUY"):
                 self._post(market, retry=True)
             return True
-        if str(remote.token_id) != order["token"] or str(remote.side).upper() != "BUY":
+        if str(remote.token_id) != order["token"] or str(remote.side).upper() != order.get("side", "BUY"):
             market["blocked"] = "Order ID resolves to unexpected token/side"
             self._persist()
             return True
@@ -456,7 +560,8 @@ class HedgeExit:
         terminal = terminal or matched >= dec(remote.original_size)
         if terminal and settled:
             market["order"] = None
-            market["next_quote"] = 0
+            if order.get("side", "BUY") == "BUY":
+                market["next_quote"] = 0
             self._persist()
             return False
         order["unsettled"] = not settled
@@ -486,10 +591,11 @@ class HedgeExit:
                 market["blocked"] = "SDK order hash differs from exchange; reconcile before continuing"
             else:
                 order["state"] = "live"
-                log.info("[HEDGE BUY] %s shares=%s price=%s id=%s",
+                log.info("[HEDGE %s] %s shares=%s price=%s id=%s", order.get("side", "BUY"),
                          order["token"], order["shares"], order["price"], order["id"])
-        elif not retry and response.code in (
-                "market_not_ready", "not_enough_balance", "invalid_expiration", "post_only_would_cross"):
+        elif not retry and (response.code in (
+                "market_not_ready", "not_enough_balance", "invalid_expiration", "post_only_would_cross")
+                or (order.get("side") == "SELL" and order["forced"] and response.code == "fok_not_filled")):
             # Only a definite refusal of the FIRST submission releases shares.
             log.warning("[HEDGE REJECTED] %s", response.code)
             market["order"] = None
@@ -529,15 +635,19 @@ class HedgeExit:
         self._persist()
         return market["tx"] is not None
 
-    def _submit_transaction(self, condition, market, shares, approved):
+    def _submit_transaction(self, condition, market, shares, approved, sell_token=None):
         # Relayer wallet nonces are shared across conditions. Serialize through
         # confirmation, not merely until the HTTP submission returns.
         if any(m["tx"] for cid, m in self.state["markets"].items() if cid != condition):
             return
-        market["tx"] = {"kind": "merge" if approved else "approve", "shares": str(shares)}
+        market["tx"] = {"kind": "sell_approve" if sell_token else "merge" if approved else "approve",
+                        "shares": str(shares)}
         self._persist()
         try:
-            handle = (self.sdk.merge(condition, shares) if approved else self.sdk.approve(condition))
+            if sell_token:
+                handle = self.sdk.approve(condition, sell=True, token=sell_token)
+            else:
+                handle = (self.sdk.merge(condition, shares) if approved else self.sdk.approve(condition))
         except Exception:
             market["blocked"] = "Transaction submission unknown; reconcile relayer before resuming"
             self._persist()
@@ -546,7 +656,7 @@ class HedgeExit:
         self._persist()
 
     def _merge_pairs(self, condition, market, quantities):
-        if market["order"] or min(quantities) < UNIT:
+        if market["order"] or self._waiting(condition) or min(quantities) < UNIT:
             return
         shares = min(quantities).quantize(UNIT, rounding=ROUND_DOWN)
         # Wait for actual onchain tokens only at merge time.
@@ -555,29 +665,120 @@ class HedgeExit:
         else:
             log.debug("[HEDGE WAIT_BALANCE] condition=%s paired shares=%s", condition, shares)
 
+    def _recover_market(self, condition, market):
+        """A source FAILED: settle/cancel buys, merge confirmed pairs, sell surplus.
+
+        This path never creates a BUY. Recovery orders use the same durable
+        reservation/settlement checks as hedge orders and survive restarts.
+        """
+        order = market["order"]
+        if order and order.get("side", "BUY") == "BUY":
+            if order["state"] != "unknown" and not order.get("canceling"):
+                self._cancel(market)
+            return
+        if self._waiting(condition):
+            return  # never sell provisional tokens or race a late BUY settlement
+        if order and (order.get("unsettled") or order["state"] == "unknown" or order.get("canceling")):
+            return
+        quantities = [dec(market["inventory"][t]["qty"]) for t in market["tokens"]]
+        if min(quantities) >= UNIT:
+            if order:
+                self._cancel(market)
+            else:
+                self._merge_pairs(condition, market, quantities)
+            return
+        if max(quantities) == 0 and not order:
+            market["recover_sell"], market["sell_immediate"], market["next_quote"] = False, True, 0
+            self._persist()
+            return
+        index = 0 if quantities[0] >= quantities[1] else 1
+        token = market["tokens"][index]
+        if order and order["token"] != token:
+            self._cancel(market)
+            return
+        if time.time() < market["next_quote"]:
+            return
+        inv = market["inventory"][token]
+        forced = bool(self.cfg.max_hold_enabled and
+                      time.time() - inv["first"] >= self.cfg.max_hold_hours * 3600)
+        book = self.client.get_order_book(token_id=token)
+        immediate = market["sell_immediate"]
+        levels = book.bids if immediate else book.asks
+        prices = [dec(p.price) for p in levels if dec(p.size) > 0]
+        price = (max(prices) if immediate else min(prices)) if prices else None
+        entry = dec(inv["cost"]) / dec(inv["qty"])
+        gap = self.cfg.sell_min_bid_gap if immediate else self.cfg.sell_position_gap
+        market["sell_immediate"] = False
+        market["next_quote"] = time.time() + self.cfg.position_interval
+        if not forced and (price is None or not ZERO < price < ONE or price < entry - gap):
+            if order:
+                self._cancel(market)
+            else:
+                self._persist()
+            return
+        if order:
+            confirmed = dec(self.state["fills"].get(order["id"], {}).get("CONFIRMED", "0"))
+            if (forced != bool(order["forced"]) or price != dec(order["price"])
+                    or quantities[index] != dec(order["shares"]) - confirmed):
+                self._cancel(market)
+                market["next_quote"] = 0
+                self._persist()
+            return
+        # The old seller must wait for spendable conditional-token balance.
+        # Cap by BOTH confirmed ledger and actual chain/CLOB balances.
+        available = min(quantities[index], self.sdk.balances(condition)[index],
+                        self.sdk.sell_balance(condition, token))
+        shares = available.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+        if shares <= dec(getattr(self.cfg, "position_threshold", 1)) or shares < dec(book.min_order_size):
+            log.warning("[HEDGE RECOVERY WAIT] condition=%s token=%s available=%s", condition, token, available)
+            self._persist()
+            return
+        if not self.sdk.approved(condition, sell=True, token=token):
+            market["sell_immediate"], market["next_quote"] = immediate, 0
+            self._submit_transaction(condition, market, shares, False, sell_token=token)
+            return
+        signed, order_id = self.sdk.prepare_sell(condition, token, price, shares, forced)
+        # A market SELL may estimate its own limit price. Persist the actual
+        # signed order, never re-create it after an ambiguous POST result.
+        market["order"] = {
+            "id": order_id, "token": token, "side": "SELL", "shares": str(shares),
+            "price": str(price or ZERO), "signed": signed, "state": "prepared",
+            "forced": forced, "canceling": False,
+        }
+        self.state["owned_orders"][order_id] = {
+            "condition": condition, "token": token, "side": "SELL", "shares": str(shares)}
+        self._persist()
+        if not self.stopping.is_set():
+            self._post(market)
+
     def _step_market(self, condition, market):
         if self._transaction(condition, market) or market["blocked"]:
             return
         self._reservation(market)
         if market["blocked"]:
             return
-        if (not any(dec(p["qty"]) > 0 for p in market["inventory"].values())
-                and not market["order"] and not market["draining_orders"]):
+        positions = self._positions(condition, market)
+        if (not any(dec(p["qty"]) > 0 for p in positions.values())
+                and not market["order"] and not market["draining_orders"] and not market.get("recover_sell")):
             return
         if not self._quiesce(condition, market):
             return
+        if market.get("recover_sell"):
+            self._recover_market(condition, market)
+            return
         tokens = market["tokens"]
-        quantities = [dec(market["inventory"][t]["qty"]) for t in tokens]
+        positions = self._positions(condition, market)  # quiesce may ingest a late source fill
+        quantities = [dec(positions[t]["qty"]) for t in tokens]
         # Net both outcomes first, including independent reward fills. Buying
         # opposite for each fill separately would create redundant round trips.
         index = 0 if quantities[0] >= quantities[1] else 1
         source, opposite = tokens[index], tokens[1 - index]
         need = abs(quantities[0] - quantities[1])
-        inv = market["inventory"][source]
+        inv = positions[source]
         order = market["order"]
         if order and (order.get("unsettled") or order["state"] == "unknown"):
             return
-        if condition in self.state["pending_trades"].values():
+        if self._waiting(condition, allow_early=self.trigger == "matched"):
             # An unresolved source match could reduce or reverse the imbalance.
             if order and not order.get("canceling"):
                 self._cancel(market)
@@ -625,8 +826,8 @@ class HedgeExit:
                 market["next_quote"] = 0
                 self._persist()
             return
-        # Do not wait for the source balance: exact CONFIRMED shares already
-        # determine need. Only collateral is required for the opposite BUY.
+        # Do not wait for the source balance. The selected trigger supplies
+        # confirmed/provisional exact shares; only collateral gates this BUY.
         collateral = self.client.get_balance_allowance(asset_type="COLLATERAL")
         if dec(collateral.balance) / 1_000_000 < price * shares:
             log.error("[HEDGE FUNDS] condition=%s insufficient collateral for %s shares", condition, shares)

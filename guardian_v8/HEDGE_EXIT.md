@@ -1,8 +1,21 @@
 # 反向买入并合并退出
 
-`EXIT_MODE=hedge_merge` 在 BUY 成交 **CONFIRMED** 后，根据确认的份额买入同一市场的相反 outcome，再把等量 YES、NO 合并成抵押资产。原模式 `EXIT_MODE=sell` 仍为默认值。
+`EXIT_MODE=hedge_merge` 根据已成交的份额买入同一市场的相反 outcome，再把确认的等量 YES、NO 合并成抵押资产。触发点由 `HEDGE_TRIGGER` 选择：默认 `confirmed` 等成交确认；`matched` 提前到撮合事件。原模式 `EXIT_MODE=sell` 仍为默认值。
 
 本次仅增加退出方式，不更改奖励市场筛选、步长筛选或 midpoint 区间参数。未修改真实 `.env`，未运行实盘订单。改动前 Git 基线为 `bd4bad2`。
+
+### MATCHED 提前触发（可选）
+
+```dotenv
+EXIT_MODE=hedge_merge
+HEDGE_TRIGGER=matched
+```
+
+设置后，自己的原始 BUY 撮合份额单独记为暂记份额，允许触发反向 BUY；后续 `MINED` / `RETRYING` / `CONFIRMED` 更新不会重复增加买入数量。若断线后第一次 REST 补查已处于 MINED / RETRYING，也按已撮合、未确认处理。反向 BUY 自身的撮合仍作为已有订单的预留处理，不递归触发新 BUY。WS 若缺少可选的 `bucket_index`，为避免与 REST 同一成交重复计数，等待原有 REST 补查取得完整字段再处理，不猜 bucket 为 0。
+
+原始成交最终 FAILED 时：先停止继续补买并撤掉已有反向 BUY 的未成交部分，核实所有在途成交终态；合并已确认的配对部分，再卖出实际剩余单边份额。残余 SELL 使用该持仓的实际加权买入成本：首次按 best_bid 与 `SELL_MIN_BID_GAP` 判断，后续按 best_ask 与 `SELL_POSITION_GAP` 判断；启用超时退出时，仍按 `MAX_HOLD_HOURS` 触发份额明确的 FOK SELL。卖出需要链上及 CLOB 可用余额，零头不向上凑量，低于原持仓阈值或市场最小量时保留等待。缺少卖出授权时，持久化 `sell_approve` 交易并等待确认，授权给相应 Exchange 而非合并用的 adapter/Router，再调用 SDK 原有的条件余额缓存刷新。残余 SELL 也持久化签名和订单 ID，响应丢失不创建另一张新签订单。
+
+本次提前触发的代码基线为 `d5ef697`。仅调整触发点和必要的暂记/失败恢复记账；原来的买价反转、gap、撤单确认、REST 补查顺序、5 秒状态轮询、120 秒后续报价周期及 WSS 行情缓存均保留。收到 MATCHED 后尽快进入原下单流程，不承诺零延迟，也不越过价格保护。
 
 ## 1. 价格和份额
 
@@ -30,6 +43,7 @@
 
 ```dotenv
 EXIT_MODE=hedge_merge
+HEDGE_TRIGGER=matched
 HEDGE_POLL_INTERVAL=5
 SELL_MIN_BID_GAP=0.02
 SELL_POSITION_GAP=0.02
@@ -46,7 +60,7 @@ python main.py bot1
 
 不要同时用另一个机器人、另一台服务器或手动交易控制同一个钱包的退出仓位。SDK `0.5.0` 使用普通 CTF / negative-risk CTF 路由；SDK `0.9.0` 额外支持其市场上下文识别的普通 Polymarket Protocol V2 市场。新协议订单使用 SDK 的 Exchange V3 路由及 EIP-712 version 3，授权对象为 SDK 配置的 Router；旧 CTF 订单仍使用对应 Exchange 及 version 2、合并授权仍给 collateral adapter。调用地址、token 配对和合并编码均由相应 SDK 获取，不硬编码生产合约地址，不自行拼接跨市场或 Combo 组合。
 
-`CONFIRMED` 触发后不用等原 token 的 CLOB 余额同步。只有**合并**需要等待两边真实链上余额；`MATCHED` 可能永久 FAILED，因此本实现不会在 MATCHED 阶段提前冒险对冲。WS 事件唤醒工作线程，REST 默认每 5 秒补查；网络、撤单确认和同市场待结算成交仍可能带来延迟。
+两个触发模式的反向 BUY 都不用等原 token 的 CLOB 余额同步。**合并**只使用确认的真实链上份额；`MATCHED` 可能永久 FAILED，提前买入后可能需要走上述残余卖出恢复。WS 事件唤醒工作线程，REST 默认每 5 秒补查；网络、撤单确认和同市场未核实的成交仍可能带来延迟。
 
 ## 3. 订单与恢复保护
 
@@ -70,6 +84,8 @@ guardian_v8/data/hedge_exit/<钱包地址小写>.json
 
 使用原子替换、fsync 和进程锁。此目录已排除在 Git 外。文件含可重发的已签订单，**需要保留并妥善备份，不要上传或在聊天中粘贴完整内容**。换机器必须连同状态迁移；同钱包换实例名不应新建另一份状态。
 
+本次自动将旧 version 1 状态升级为 version 2，保留原库存、订单签名、交易 ID 与去重记录，增加暂记成交和残余卖出状态。旧代码会拒绝读取 version 2，避免误忽略提前触发的份额；不要手工改版本号或拿旧状态覆盖恢复。暂记成交未结束时也不能切回 `HEDGE_TRIGGER=confirmed`。状态命令分开展示 `inventory`、`provisional` 和 `recover_sell`，不会把暂记份额显示成可合并的已到账持仓。
+
 下面的命令只读本地状态，不读取私钥、不连接交易所，也不输出签名：
 
 ```bash
@@ -89,6 +105,8 @@ grep -E 'HEDGE FILL|HEDGE MERGED' data/bot1/trades.log
 | 状态 / 日志 | 含义与处理 |
 | --- | --- |
 | `HEDGE FUNDS` | 可用资金不足；市场暂停继续做市，等待资金满足条件。不会偷偷改成卖出或增加份额。 |
+| `HEDGE SOURCE FAILED` | 提前触发的原始成交永久失败；进入撤 BUY / 确认结算 / 合并配对 / 卖残余恢复，期间不会继续买反向份额。 |
+| `HEDGE RECOVERY WAIT` | 残余 SELL 的可用余额未同步、份额太小或不满足最小量；保留真实持仓等待，不凑量。 |
 | `HEDGE DUST` | 净缺口小于订单簿最小份额，或不足 0.01 份的精度；不向上凑量。可配对部分可合并，剩余零头保留，需要后续对账处理。 |
 | `HEDGE ORDER UNKNOWN` | 下单结果不明；保留预留，核实同一订单。不会因为一次查不到就新建另一笔。 |
 | `Transaction submission unknown` | 授权/合并请求响应丢失，尚无可核对的交易 ID。该市场停止继续买入/合并；先核实 Relayer 历史、链上交易及余额，再修复记录。单纯重启不会解除，不能靠删除状态“重试”。 |

@@ -232,6 +232,8 @@ class Config:
     # ── 持仓卖出阈值 ──────────────────────────────────────────────────────────
     # sell 保持原行为；hedge_merge 用反向等份额 BUY + 合并退出。
     exit_mode: str = field(default_factory=lambda: os.environ.get("EXIT_MODE", "sell").strip().lower())
+    hedge_trigger: str = field(
+        default_factory=lambda: os.environ.get("HEDGE_TRIGGER", "confirmed").strip().lower())
     hedge_poll_interval: float = field(
         default_factory=lambda: float(os.environ.get("HEDGE_POLL_INTERVAL", "5")))
     position_threshold: float = 1.0
@@ -296,6 +298,8 @@ class Config:
         """V8.2：只要求 pk；wallet/relayer/proxy 按账户格式可选。"""
         if self.exit_mode not in ("sell", "hedge_merge"):
             raise EnvironmentError("EXIT_MODE 只允许 sell / hedge_merge")
+        if self.hedge_trigger not in ("confirmed", "matched"):
+            raise EnvironmentError("HEDGE_TRIGGER 只允许 confirmed / matched")
         if not 1 <= self.hedge_poll_interval <= 60:
             raise EnvironmentError("HEDGE_POLL_INTERVAL 必须在 1～60 秒之间")
         if self.exit_mode == "hedge_merge":

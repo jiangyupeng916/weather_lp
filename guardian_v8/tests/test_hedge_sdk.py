@@ -125,6 +125,72 @@ def test_reject_sdk_size_change_before_submission():
     sdk.client.post_order.assert_not_called()
 
 
+@pytest.mark.parametrize("forced", [False, True])
+def test_recovery_sell_is_share_exact_and_forced_uses_shares_keyword(forced, monkeypatch):
+    refresh = Mock()
+    monkeypatch.setattr("polymarket._internal.actions.orders.place._refresh_balance_allowance_sync", refresh)
+    sdk = adapter()
+    order = replace(signed(), side="SELL", maker_amount=20_000_000, taker_amount=2_800_000,
+                    order_type="FOK" if forced else "GTC")
+    sdk.client.create_limit_order.return_value = order
+    sdk.client.create_market_order = Mock(return_value=order)
+    data, _ = sdk.prepare_sell("condition", CTF_TOKEN, D("0.14"), D(20), forced)
+    refresh.assert_called_once_with(sdk.client, order)
+    assert data["side"] == "SELL" and data["maker_amount"] == 20_000_000
+    if forced:
+        sdk.client.create_market_order.assert_called_once_with(
+            token_id=CTF_TOKEN, side="SELL", shares="20", order_type="FOK")
+    else:
+        sdk.client.create_limit_order.assert_called_once_with(
+            token_id=CTF_TOKEN, side="SELL", price="0.14", size="20")
+
+
+def test_recovery_sell_balance_selects_protocol_asset_type():
+    sdk = adapter()
+    sdk.client.get_balance_allowance = Mock(return_value=NS(balance=20_000_000))
+    assert sdk.sell_balance("condition", CTF_TOKEN) == D(20)
+    sdk.client.get_balance_allowance.assert_called_with(asset_type="CONDITIONAL", token_id=CTF_TOKEN)
+    if SDK_VERSION == "0.9.0":
+        sdk.contexts["v2"] = NS(protocol="v2")
+        sdk.sell_balance("v2", V2_TOKEN)
+        sdk.client.get_balance_allowance.assert_called_with(asset_type="CONDITIONAL-V2", token_id=V2_TOKEN)
+
+
+def test_real_sdk_market_sell_validation_uses_shares_not_amount():
+    from polymarket._internal.actions.orders.market import validate_market_order_params
+    from polymarket.errors import UserInputError
+    params = validate_market_order_params(token_id=CTF_TOKEN, side="SELL", shares="20", order_type="FOK")
+    assert params.shares == D(20) and params.order_type == "FOK"
+    with pytest.raises(UserInputError):
+        validate_market_order_params(token_id=CTF_TOKEN, side="SELL", amount="20", order_type="FOK")
+
+
+@pytest.mark.parametrize("protocol", ["ctf", "v2"])
+def test_recovery_sell_approval_targets_exchange_instead_of_merge_operator(protocol):
+    if protocol == "v2" and SDK_VERSION != "0.9.0":
+        pytest.skip("V2 requires SDK 0.9.0")
+    from eth_abi import encode, decode
+    sdk = adapter()
+    ctx = sdk.context("condition")
+    ctx.protocol, ctx.neg_risk = protocol, True
+    token = CTF_TOKEN
+    ledger, exchange = LEDGER, NEG_EXCHANGE
+    if protocol == "v2":
+        token = V2_TOKEN
+        ctx.token_ids = (str(int(token) - 1), token)
+        ctx.position_erc1155_address = V2_LEDGER
+        ledger, exchange = V2_LEDGER, V3_EXCHANGE
+    sdk.client._ctx.rpc = NS(eth_call=Mock(return_value="0x" + encode(["bool"], [True]).hex()))
+    assert sdk.approved("condition", sell=True, token=token)
+    params = sdk.client._ctx.rpc.eth_call.call_args.kwargs
+    assert params["to"] == ledger
+    assert decode(["address", "address"], bytes.fromhex(params["data"][10:])) == (WALLET, exchange)
+    sdk.client.approve_erc1155_for_all = Mock()
+    sdk.approve("condition", sell=True, token=token)
+    sdk.client.approve_erc1155_for_all.assert_called_once_with(
+        token_address=ledger, operator_address=exchange, approved=True)
+
+
 def test_unknown_sdk_version_fails_before_trading(monkeypatch):
     monkeypatch.setattr("hedge_sdk.version", lambda _: "0.6.0")
     with pytest.raises(RuntimeError, match="installed 0.6.0"):

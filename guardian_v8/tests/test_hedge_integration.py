@@ -28,6 +28,15 @@ def test_default_mode_is_legacy_and_env_selects_new_mode(monkeypatch):
     assert Config().exit_mode == "hedge_merge"
 
 
+def test_matched_trigger_is_opt_in_and_validated(monkeypatch):
+    monkeypatch.delenv("HEDGE_TRIGGER", raising=False)
+    assert Config().hedge_trigger == "confirmed"
+    monkeypatch.setenv("HEDGE_TRIGGER", "matched")
+    assert Config().hedge_trigger == "matched"
+    with pytest.raises(EnvironmentError, match="HEDGE_TRIGGER"):
+        config(hedge_trigger="invalid").validate()
+
+
 def test_mode_requires_relayer_pair_and_valid_values():
     with pytest.raises(EnvironmentError, match="EXIT_MODE"):
         config(exit_mode="typo").validate()

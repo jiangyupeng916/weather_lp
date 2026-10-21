@@ -180,6 +180,8 @@ class Guardian:
                     "启用" if self.cfg.max_hold_enabled else "关闭",
                     self.cfg.max_hold_hours)
         logger.info("成交退出模式: %s", self.cfg.exit_mode)
+        if self.hedge_exit is not None:
+            logger.info("反向买入触发状态: %s", self.cfg.hedge_trigger)
         logger.info("=" * 60)
 
     # ── 信号处理 ──────────────────────────────────────────────────────────────

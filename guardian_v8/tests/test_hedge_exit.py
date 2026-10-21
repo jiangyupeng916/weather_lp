@@ -32,8 +32,8 @@ def trade(tid="fill-1", oid="reward-1", token="yes", qty="20", price="0.85",
     return data
 
 
-def remote(oid, token="no", qty="20", matched="0", status="LIVE", associated=()):
-    return NS(id=oid, token_id=token, side="BUY", market="condition", price=D("0.16"),
+def remote(oid, token="no", qty="20", matched="0", status="LIVE", associated=(), side="BUY"):
+    return NS(id=oid, token_id=token, side=side, market="condition", price=D("0.16"),
               original_size=D(qty), size_matched=D(matched), status=status,
               associate_trades=associated)
 
@@ -85,6 +85,9 @@ class PaperSDK:
         self.cancels = []
         self.merges = []
         self.approvals = []
+        self.sells = []
+        self.sell_approvals = []
+        self.is_sell_approved = True
         self.wallet_balances = (D(20), D(20))
         self.balance_reads = 0
         self.is_approved = True
@@ -108,7 +111,7 @@ class PaperSDK:
         self.posts.append(copy.deepcopy(signed))
         if not self.post_timeout or self.accept_timeout:
             self.client.orders.setdefault(signed["id"], remote(
-                signed["id"], signed["token"], signed["shares"]))
+                signed["id"], signed["token"], signed["shares"], side=signed.get("side", "BUY")))
         if self.post_timeout:
             raise TimeoutError("response lost")
         if self.reject:
@@ -124,10 +127,22 @@ class PaperSDK:
         self.balance_reads += 1
         return self.wallet_balances
 
-    def approved(self, condition):
-        return self.is_approved
+    def sell_balance(self, condition, token):
+        return self.wallet_balances[0 if token == "yes" else 1]
 
-    def approve(self, condition):
+    def prepare_sell(self, condition, token, price, shares, forced):
+        signed = dict(id=f"sell-{len(self.sells) + 1}", token=token, side="SELL",
+                      price=str(price), shares=str(shares), forced=forced)
+        self.sells.append(signed)
+        return signed, signed["id"]
+
+    def approved(self, condition, *, sell=False, token=None):
+        return self.is_sell_approved if sell else self.is_approved
+
+    def approve(self, condition, *, sell=False, token=None):
+        if sell:
+            self.sell_approvals.append((condition, token))
+            return NS(transaction_id="sell-approval-tx", transaction_hash=None)
         self.approvals.append(condition)
         return NS(transaction_id="approval-tx", transaction_hash=None)
 

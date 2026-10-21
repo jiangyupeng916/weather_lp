@@ -8,8 +8,12 @@ from pathlib import Path
 def summarize(state):
     markets = []
     for condition, market in state["markets"].items():
+        provisional = {t: str(sum((Decimal(p["qty"]) for p in state.get("pending_legs", {}).values()
+                                   if p["condition"] == condition and p["token"] == t and p["early"]), Decimal(0)))
+                       for t in market["tokens"]}
         if not (market["order"] or market["tx"] or market["blocked"]
-                or market["draining_orders"]
+                or market["draining_orders"] or market.get("recover_sell")
+                or any(Decimal(p) for p in provisional.values())
                 or any(Decimal(p["qty"]) for p in market["inventory"].values())):
             continue
         order = market["order"] or {}
@@ -19,8 +23,10 @@ def summarize(state):
             "order": {k: order[k] for k in ("id", "token", "shares", "price", "state", "canceling") if k in order},
             "transaction": market["tx"], "blocked": market["blocked"],
             "draining_orders": market["draining_orders"],
+            "recover_sell": market.get("recover_sell", False), "provisional": provisional,
         })
     return {"wallet": state["wallet"], "enabled": state["enabled"],
+            "trigger": state.get("trigger", "confirmed"),
             "initialized": state["initialized"],
             "pending_trades": state["pending_trades"], "markets": markets}
 

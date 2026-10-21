@@ -40,11 +40,11 @@ class HedgeSDK:
         return tuple(Decimal(b) / 1_000_000
                      for b in decode_erc1155_balance_of_batch_result(result))
 
-    def approved(self, condition):
+    def approved(self, condition, *, sell=False, token=None):
         from polymarket._internal.actions.relayer.calls import (
             erc1155_is_approved_for_all_call, decode_erc1155_is_approved_for_all_result)
         ledger = self._approval_ledger(condition)
-        operator = self._operator(condition)
+        operator = self._sell_operator(condition, token) if sell else self._operator(condition)
         call = erc1155_is_approved_for_all_call(
             token_address=ledger, owner=self.client.wallet, operator=operator)
         try:
@@ -56,12 +56,23 @@ class HedgeSDK:
         return decode_erc1155_is_approved_for_all_result(
             result)
 
-    def approve(self, condition):
+    def approve(self, condition, *, sell=False, token=None):
         ledger = self._approval_ledger(condition)
-        operator = self._operator(condition)
+        operator = self._sell_operator(condition, token) if sell else self._operator(condition)
         self.rate_wait()
         return self.client.approve_erc1155_for_all(
             token_address=str(ledger), operator_address=str(operator), approved=True)
+
+    def _sell_operator(self, condition, token):
+        ctx = self.context(condition)
+        env = self.client._ctx.environment_config
+        if token not in self.tokens(condition):
+            raise ValueError("Recovery SELL token does not belong to condition")
+        if self.sdk_version == "0.9.0":
+            from polymarket._internal.actions.orders.context import resolve_order_exchange_address
+            return resolve_order_exchange_address(env, asset_id=token, neg_risk=bool(ctx.neg_risk))
+        from polymarket._internal.actions.orders.context import resolve_exchange_address
+        return resolve_exchange_address(env, ctx.neg_risk)
 
     def _approval_ledger(self, condition):
         ctx = self.context(condition)
@@ -102,6 +113,29 @@ class HedgeSDK:
         # exit uses an aggressive limit, never a cash-budget market order.
         if signed.taker_amount != int(shares * 1_000_000):
             raise ValueError("SDK changed hedge share quantity")
+        return asdict(signed), self.order_id(condition, signed)
+
+    def sell_balance(self, condition, token):
+        asset_type = "CONDITIONAL"
+        if getattr(self.context(condition), "protocol", "ctf") == "v2":
+            asset_type = "CONDITIONAL-V2"
+        balance = self.client.get_balance_allowance(asset_type=asset_type, token_id=token)
+        return Decimal(balance.balance) / 1_000_000
+
+    def prepare_sell(self, condition, token, price, shares, forced):
+        if forced:
+            # SELL market orders use shares in BOTH audited SDK versions.
+            signed = self.client.create_market_order(
+                token_id=token, side="SELL", shares=str(shares), order_type="FOK")
+        else:
+            signed = self.client.create_limit_order(
+                token_id=token, side="SELL", price=str(price), size=str(shares))
+        if signed.maker_amount != int(shares * 1_000_000):
+            raise ValueError("SDK changed recovery sell share quantity")
+        # Same conditional-balance cache refresh used by the SDK's legacy SELL
+        # allowance recovery, after its onchain approval has been confirmed.
+        from polymarket._internal.actions.orders.place import _refresh_balance_allowance_sync
+        _refresh_balance_allowance_sync(self.client, signed)
         return asdict(signed), self.order_id(condition, signed)
 
     def order_id(self, condition, signed):
