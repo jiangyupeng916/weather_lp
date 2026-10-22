@@ -3,7 +3,7 @@ import copy
 from decimal import Decimal as D
 import time
 from types import SimpleNamespace as NS
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -30,9 +30,11 @@ def holdings(client, sdk, yes="20", no="0", yes_price="0.85", no_price="0.15"):
 
 
 def activate(engine):
-    engine.step()
-    assert not engine.ready and not engine.state["initialized"]
-    engine.step()
+    with patch("hedge_exit.time.time", return_value=time.time()):
+        engine.step()
+    assert not engine.ready and engine.state["initialized"]
+    with patch("hedge_exit.time.time", return_value=engine.state["since"] + 0.01):
+        engine.step()
     assert engine.ready and engine.state["initialized"]
 
 
@@ -148,87 +150,101 @@ def test_restart_after_manual_cleanup_ignores_old_unknown_signed_order(env):
 
 
 @pytest.mark.parametrize("side", ["BUY", "SELL"])
-def test_old_live_orders_are_canceled_before_snapshot_and_new_exit(live, side):
+def test_initialization_does_not_read_or_cancel_existing_orders(live, monkeypatch, side):
     engine, client, sdk = live
     holdings(client, sdk)
     client.orders["old"] = remote("old", side=side)
-    engine.step()
-    assert sdk.cancels == ["old"] and not sdk.prepared
-    assert not engine.ready
-    activate(engine)
-    assert sdk.prepared[0]["shares"] == "20.00"
+    monkeypatch.setattr(client, "list_open_orders", Mock(side_effect=AssertionError("Not needed for snapshot")))
+    monkeypatch.setattr(client, "get_order", Mock(side_effect=AssertionError("Not needed for snapshot")))
+    engine._bootstrap()
+    assert engine.state["initialized"] and not sdk.cancels and not sdk.prepared
+    assert client.orders["old"].status == "LIVE"
 
 
-def test_cancel_race_waits_for_trade_settlement_then_counts_snapshot_once(live):
+def test_initialization_does_not_load_historical_or_pending_trades(live, monkeypatch):
     engine, client, sdk = live
     holdings(client, sdk)
-    client.orders["old"] = remote("old", "yes", matched="7", associated=("late",))
-    event = trade("late", "old", qty="7", status="MATCHED")
-    client.trades["late"] = event
-    engine.step()  # cancel old order
-    with pytest.raises(RuntimeError, match="in-flight"):
-        engine.step()
-    assert not sdk.prepared and not engine.ready
-    event["status"] = "CONFIRMED"
-    activate(engine)
-    assert sdk.prepared[0]["shares"] == "20.00"  # not 20 + the old 7-share fill
-    assert D(engine.state["fills"]["old"]["CONFIRMED"]) == 7
+    client.trades["old"] = trade("old", status="MATCHED")
+    monkeypatch.setattr(client, "list_account_trades", Mock(side_effect=AssertionError("Do not replay old trades")))
+    engine._bootstrap()
+    assert engine.state["initialized"] and not engine.state["pending_trades"]
+    assert not engine.state["fills"] and not engine.state["seen"]
+    assert D(engine.state["markets"]["condition"]["inventory"]["yes"]["qty"]) == 20
 
 
-def test_missing_associated_trade_details_cannot_be_treated_as_no_fill(live):
-    engine, client, sdk = live
-    holdings(client, sdk)
-    client.orders["old"] = remote("old", "yes", matched="7", associated=("late",))
-    engine.step()
-    with pytest.raises(RuntimeError, match="trade details"):
-        engine.step()
-    assert not sdk.prepared and not engine.ready
-
-
-def test_data_api_lag_waits_for_chain_agreement_instead_of_hedging_stale_shares(live):
+def test_initialization_uses_position_api_even_when_chain_quantity_differs(live):
     engine, client, sdk = live
     holdings(client, sdk, yes="10")
     sdk.wallet_balances = (D(20), D(0))
-    with pytest.raises(RuntimeError, match="balances to agree"):
-        engine.step()
-    assert not sdk.prepared and not engine.state["initialized"]
+    activate(engine)
+    assert sdk.prepared[0]["shares"] == "10.00" and sdk.balance_reads == 0
+
+
+def test_chain_rpc_failure_does_not_block_single_side_snapshot_initialization(live, monkeypatch):
+    engine, client, sdk = live
     holdings(client, sdk)
+    monkeypatch.setattr(sdk, "balances", Mock(side_effect=TimeoutError("RPC unavailable")))
     activate(engine)
     assert sdk.prepared[0]["shares"] == "20.00"
 
 
-def test_recent_fill_discovers_position_not_yet_visible_in_data_api(live):
+def test_actual_merge_still_waits_for_sufficient_chain_shares(live):
     engine, client, sdk = live
-    client.trades["recent"] = trade("recent")
+    holdings(client, sdk, no="20")
     sdk.wallet_balances = (D(20), D(0))
-    with pytest.raises(RuntimeError, match="balances to agree"):
-        engine.step()
-    assert not sdk.prepared
-
-
-def test_trade_arriving_during_snapshot_requires_a_new_stable_snapshot(live, monkeypatch):
-    engine, client, sdk = live
-    holdings(client, sdk)
-    original = client.list_positions
-    def positions(**kwargs):
-        client.trades["new"] = trade("new", qty="20")
-        return original(**kwargs)
-    monkeypatch.setattr(client, "list_positions", positions)
-    engine.step()  # history changed during read
-    assert not sdk.prepared and not engine.state["initialized"]
     activate(engine)
-    assert sdk.prepared[0]["shares"] == "20.00"
+    assert not sdk.merges and sdk.balance_reads == 1
+    sdk.wallet_balances = (D(20), D(20))
+    engine.step()
+    assert sdk.merges == [("condition", D(20))]
 
 
-def test_position_cost_changes_restart_stability_check(live):
+def test_position_query_failure_cannot_be_treated_as_empty_holdings(live, monkeypatch):
+    engine, client, sdk = live
+    monkeypatch.setattr(client, "list_positions", Mock(side_effect=TimeoutError("Data API unavailable")))
+    with pytest.raises(TimeoutError, match="Data API"):
+        engine.step()
+    assert not sdk.prepared and not engine.state["initialized"]
+    assert not engine.ready
+
+
+def test_initialization_needs_only_one_complete_position_read(live, monkeypatch):
+    engine, client, sdk = live
+    holdings(client, sdk, yes_price="0.83")
+    read = Mock(wraps=client.list_positions)
+    monkeypatch.setattr(client, "list_positions", read)
+    engine._bootstrap()
+    assert engine.state["initialized"] and read.call_count == 1
+    assert D(engine.state["markets"]["condition"]["inventory"]["yes"]["cost"]) == D("16.6")
+
+
+def test_reward_placement_waits_for_snapshot_second_boundary(live):
     engine, client, sdk = live
     holdings(client, sdk)
+    with patch("hedge_exit.time.time", return_value=time.time()):
+        engine.step()
+    assert engine.state["initialized"] and not engine.ready and not sdk.prepared
+    with patch("hedge_exit.time.time", return_value=engine.state["since"] - 0.01):
+        engine.step()
+        assert engine.blocks("yes") and not sdk.prepared
+    with patch("hedge_exit.time.time", return_value=engine.state["since"]):
+        engine.step()
+        assert engine.ready and len(sdk.prepared) == 1
+
+
+def test_undated_new_ws_trade_is_recovered_using_rest_original_match_time(live):
+    engine, client, sdk = live
+    holdings(client, sdk, yes_price="0.99")
+    activate(engine)
+    event = trade("new", "new-reward", qty="3", price="0.85")
+    event["match_time"] = str(engine.state["since"])
+    client.trades[event["id"]] = event
+    ws = copy.deepcopy(event)
+    ws.pop("match_time")
+    engine.notify(ws)
     engine.step()
-    holdings(client, sdk, yes_price="0.83")
-    engine.step()
-    assert not engine.state["initialized"] and not sdk.prepared
-    engine.step()
-    assert D(engine.state["markets"]["condition"]["inventory"]["yes"]["cost"]) == D("16.6")
+    inv = engine.state["markets"]["condition"]["inventory"]["yes"]
+    assert D(inv["qty"]) == 23 and D(inv["cost"]) == D("22.35")
 
 
 @pytest.mark.parametrize("timestamp", [True, False])

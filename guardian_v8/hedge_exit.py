@@ -230,8 +230,6 @@ class HedgeExit:
         self._owned_orders = set(self.state["owned_orders"])
         self._missing_book_logs = {}
         self._small_buy_logs = {}
-        self._startup_after = int(time.time()) - 600
-        self._startup_sample = None
         self.last_poll = 0.0
         self._persist()
 
@@ -295,16 +293,17 @@ class HedgeExit:
             if self.fatal:
                 log.critical("[HEDGE JOURNAL] Cannot persist state; restart only after repairing storage")
                 return
-            self.wake.wait(self.cfg.hedge_poll_interval)
+            delay = self.cfg.hedge_poll_interval
+            if self.state["initialized"] and not self.ready:
+                remaining = self.state["since"] - time.time()
+                if remaining > 0:
+                    delay = min(delay, remaining)
+            self.wake.wait(delay)
             self.wake.clear()
 
     def _bootstrap(self):
         if self.state["startup_mode"] == "positions":
-            try:
-                self._bootstrap_positions()
-            except Exception:
-                self._startup_sample = None
-                raise
+            self._bootstrap_positions()
             return
         # Migrating an account with old positions using a delayed Data API
         # snapshot would double-count trades. Require a clean activation once.
@@ -330,66 +329,10 @@ class HedgeExit:
         self.state["initialized"] = True
         self._persist()
 
-    def _startup_trades(self):
-        """Read recent trades plus every fill attached to a canceled old order."""
-        rows = {}
-        queries = [{"after": str(self._startup_after)}]
-        associated = {tid for order in self.state["startup_orders"].values() for tid in order["trades"]}
-        queries.extend({"id": tid} for tid in sorted(associated))
-        for query in queries:
-            found = False
-            for page in self.client.list_account_trades(**query):
-                for event in page.items:
-                    if not list(own_legs(event, self.address, self.owner)):
-                        continue
-                    found = True
-                    tid = str(value(event, "id", default=""))
-                    if not tid or status_of(event) not in ("CONFIRMED", "FAILED"):
-                        self._startup_sample = None
-                        raise RuntimeError("Startup positions: waiting for in-flight trade settlement")
-                    rows[(tid, value(event, "bucket_index", default=0))] = event
-            if "id" in query and not found:
-                self._startup_sample = None
-                raise RuntimeError("Startup positions: waiting for canceled order trade details")
-        return rows
-
     def _bootstrap_positions(self):
-        """Rebuild from a quiet, chain-checked position snapshot, never old orders."""
-        def fingerprint(rows):
-            return {key: (status_of(event), tuple(own_legs(event, self.address, self.owner)))
-                    for key, event in rows.items()}
-
-        # Until initialized, blocks() prevents all new reward placements. Cancel
-        # old BUY/SELL orders before measuring exposure so they cannot fill later.
-        open_orders = [o for page in self.client.list_open_orders() for o in page.items]
-        for order in open_orders:
-            self.state["startup_orders"].setdefault(str(order.id), {
-                "condition": str(value(order, "condition_id", "market", default="")),
-                "trades": list(order.associate_trades),
-            })
-        if open_orders:
-            self._startup_sample = None
-            self._persist()
-            for order in open_orders:
-                self.sdk.cancel(str(order.id))
-            return
-        for oid in self.state["startup_orders"]:
-            order = self.client.get_order(order_id=oid)
-            terminal = str(order.status).upper() in ("CANCELED", "CANCELLED", "EXPIRED", "UNMATCHED")
-            if not terminal and dec(order.size_matched) < dec(order.original_size):
-                self._startup_sample = None
-                return
-            self.state["startup_orders"][oid]["trades"] = list(order.associate_trades)
-            if dec(order.size_matched) > 0 and not order.associate_trades:
-                self._startup_sample = None
-                raise RuntimeError("Startup positions: waiting for canceled order trade IDs")
-
-        start = int(time.time())
-        before = self._startup_trades()
-        before_fingerprint = fingerprint(before)
+        """Use current Data API shares and entry prices as the sole baseline."""
         positions = {}
-        conditions = {str(value(e, "condition_id", "market")) for e in before.values()}
-        conditions.update(o["condition"] for o in self.state["startup_orders"].values())
+        conditions = set()
         for page in self.client.list_positions(size_threshold=0, page_size=100):
             for pos in page.items:
                 if value(pos, "size") is None:
@@ -419,39 +362,17 @@ class HedgeExit:
                 raise ValueError("Startup requires two distinct outcomes of one condition")
             if any(cid == condition and token not in tokens for cid, token in positions):
                 raise ValueError("Startup position token does not belong to condition")
-            balances = tuple(dec(q).quantize(UNIT, rounding=ROUND_DOWN) for q in self.sdk.balances(condition))
-            quantities = tuple(positions.get((condition, t), (ZERO, ZERO))[0] for t in tokens)
-            if balances != quantities:
-                self._startup_sample = None
-                raise RuntimeError("Startup positions: waiting for Data API and chain balances to agree")
-            if any(quantities):
-                snapshot[condition] = {t: positions.get((condition, t), (ZERO, ZERO)) for t in tokens}
-        after = self._startup_trades()
-        after_fingerprint = fingerprint(after)
-        if before_fingerprint != after_fingerprint or any(
-                page.items for page in self.client.list_open_orders()):
-            self._startup_sample = None
-            return
-        sample = (snapshot, after_fingerprint)
-        if self._startup_sample != sample:
-            self._startup_sample = sample
-            return  # require two consecutive matching snapshots before any BUY
-
-        # Baseline fills are already represented by the snapshot. Seed dedupe
-        # keys, including same-second / timestamp-less late WS messages.
-        for (tid, bucket), event in after.items():
-            status = status_of(event)
-            self.state["terminal_trades"][tid] = status
-            for oid, token, side, qty, price in own_legs(event, self.address, self.owner):
-                self.state["seen"][f"{tid}:{bucket}:{oid}:{token}:{side}"] = status
-                totals = self.state["fills"].setdefault(oid, {"CONFIRMED": "0", "FAILED": "0"})
-                totals[status] = str(dec(totals[status]) + qty)
+            snapshot[condition] = {t: positions.get((condition, t), (ZERO, ZERO)) for t in tokens}
+        # CLOB match times have second precision. Keep reward placement paused
+        # until the next second, separating the snapshot from this run's fills.
+        start = int(time.time()) + 1
         for condition, holdings in snapshot.items():
             market = self._market(condition)
             market["inventory"] = {t: {"qty": str(qty), "cost": str(qty * price),
                                         "first": start if qty else 0}
                                    for t, (qty, price) in holdings.items()}
-        self.state.update(initialized=True, since=start, cursor=start, startup_orders={})
+        self.state.update(initialized=True, since=start, cursor=start,
+                          snapshot_only=True, startup_orders={})
         self.last_poll = time.time()
         self._persist()
         log.info("[HEDGE STARTUP POSITIONS] Rebuilt %s markets from current positions", len(snapshot))
@@ -501,6 +422,11 @@ class HedgeExit:
         if not trade_id or not condition or not legs:
             return
         matched = value(event, "matched_at", "match_time", "matchtime")
+        if matched is None and self.state.get("snapshot_only"):
+            # An undated WS event might already be in the baseline. Let REST
+            # provide its original match time rather than adding it speculatively.
+            self.last_poll = 0
+            return
         if matched is not None:
             if hasattr(matched, "timestamp"):
                 matched = matched.timestamp()
@@ -656,6 +582,8 @@ class HedgeExit:
             self._bootstrap()
             if not self.state["initialized"]:
                 return
+        if not self.ready and time.time() < self.state["since"]:
+            return
         while not self.inbox.empty():
             # Do not lose a failed event: REST replay is an additional backstop.
             event = self.inbox.get_nowait()

@@ -2,9 +2,9 @@
 
 `EXIT_MODE=hedge_merge` 根据已成交的份额买入同一市场的相反 outcome，再把确认的等量 YES、NO 合并成抵押资产。触发点由 `HEDGE_TRIGGER` 选择：默认 `confirmed` 等成交确认；`matched` 提前到撮合事件。原模式 `EXIT_MODE=sell` 仍为默认值。
 
-**当前默认启动方式为 `HEDGE_STARTUP_MODE=positions`**：每次启动归档上次本地记录，从账户当前持仓、实际均价及链上余额重新建立退出任务。已有 YES/NO 等量配对可合并；单边净缺口继续按原阈值买入相反方向。人工清理后的真实余额会成为新基准，不继续重发旧文件中的订单。
+**当前默认启动方式为 `HEDGE_STARTUP_MODE=positions`**：每次启动归档上次本地记录，仅用持仓接口返回的当前份额、均价重新建立退出任务，不要求持仓接口与链上份额完全一致。已有 YES/NO 等量配对可合并；单边净缺口继续按原阈值买入相反方向，不继续重发旧文件中的订单。人工卖出后的持仓接口可能稍晚更新，初始化以接口本次返回值为准。
 
-本次启动方式与日志限制修改前的代码保存在 Git 提交 `3172197`。未修改真实 `.env`，未运行实盘订单。
+本次简化初始化前的完整代码保存在 Git 提交 `9463d4a`。未修改真实 `.env`，未运行实盘订单。
 
 ### MATCHED 提前触发（可选）
 
@@ -39,7 +39,7 @@ HEDGE_TRIGGER=matched
 
 ## 2. 启用
 
-1. 停止旧实例；如需人工清理，先完成清理并核实已有链上交易终态。默认 `positions` 模式可以接管当前持仓：启动先撤账户现存 BUY/SELL 订单，核实撤单及相关成交已结算，再读取持仓接口的份额和均价，与链上余额逐项对照。连续两次快照一致后才恢复新挂单；快照前后的近期成交及旧单相关成交仅用于核对和去重，不再次加到快照份额中。持仓接口滞后、均价缺失或仍有在途成交时继续等待，不按空仓处理。
+1. 停止旧实例；如需人工清理，先完成清理并核实已有链上交易终态。默认 `positions` 初始化只分页读取当前持仓的份额和均价，并核实 token 属于该市场；不查询旧成交、不等待撤单、不读取链上余额，不再要求两种份额一致或连续两次快照一致。接口读取失败、均价缺失或条目非法时暂停，不把失败当空仓。读取完成后以下一秒作为新成交时间边界，新挂单在此边界开始；避免同秒旧成交重复计入。初始化后的正常成交补查、同市场订单处理和合并余额校验保留。
 2. 更新代码及依赖。当前安装依赖为 `polymarket-client==0.9.0`，服务器已经是 `0.9.0` 时无需降级。适配器也保留已核验的 `0.5.0` 兼容路径；其他未经验证的版本会在新模式启动时明确拒绝运行。此前仅允许 `0.5.0` 的版本检查已修正，不要手动删除检查来绕过适配。
 3. 在对应 `.env.botN` 添加：
 
@@ -89,7 +89,7 @@ guardian_v8/data/hedge_exit/<钱包地址小写>.json
 
 使用原子替换、fsync 和进程锁。此目录已排除在 Git 外。文件含可重发的已签订单，**需要保留并妥善备份，不要上传或在聊天中粘贴完整内容**。默认启动先取得同一钱包的进程锁，把旧文件原样移动到 `data/hedge_exit/archive/<钱包>.<时间戳>.json`，不解析其内容；归档失败则停止初始化，不覆盖旧文件。同钱包换实例名仍使用同一活动路径及进程锁。若选择 `resume` 或迁移未完成任务，需连同状态迁移。
 
-当前记录格式为 version 2；`resume` 兼容读取 version 1，保留原库存、订单签名、交易 ID 与去重记录，并增加暂记成交和残余卖出状态。较早代码会拒绝读取 version 2；不要手工改版本号。在 `resume` 模式下，暂记成交未结束时不能切回 `HEDGE_TRIGGER=confirmed`。状态命令展示 `startup_mode`、初始化时尚待核实的 `startup_orders`、真实 `inventory`、`provisional` 和 `recover_sell`，不把暂记份额当作已到账持仓。
+当前记录格式为 version 2；`resume` 兼容读取 version 1，保留原库存、订单签名、交易 ID 与去重记录，并增加暂记成交和残余卖出状态。较早代码会拒绝读取 version 2；不要手工改版本号。在 `resume` 模式下，暂记成交未结束时不能切回 `HEDGE_TRIGGER=confirmed`。状态命令展示 `startup_mode`、`inventory`、`provisional` 和 `recover_sell`，不把暂记份额当作已到账持仓。
 
 下面的命令只读本地状态，不读取私钥、不连接交易所，也不输出签名：
 
@@ -111,8 +111,8 @@ grep -E 'HEDGE FILL|HEDGE MERGED' data/bot1/trades.log
 | --- | --- |
 | `HEDGE RETRY ... missing_orderbook=1/3` | 接口返回 `No orderbook exists for the requested token id`（订单簿不存在）。同一市场、同一 token 在持续不可用期间最多输出 3 条；第 3 条提示后续同类日志静默。后台仍按原周期检查，订单簿恢复后清零计数并输出 `HEDGE BOOK RESTORED`，下单、成交对账和合并可继续；不会清除持仓或把任务标为完成。计数仅影响日志，进程重启后重新计数，其他错误仍照常报告。 |
 | `HEDGE ORDER UNKNOWN ... minimum_amount=1/3` | `invalid amount for a marketable BUY order (...), min size: ...`：订单金额未达到接口要求。同一订单最多输出 3 条此类报错，之后静默；同次运行仍保留订单预留、对账并只重发原签名，不自动扩大份额。其他下单异常正常报告。 |
-| `HEDGE STARTUP POSITIONS` | 已按最新持仓重建退出任务，开始处理当前配对及单边缺口；旧文件中的库存、订单与阶段未读入。 |
-| `Startup positions: waiting ...` | 等待旧单成交终态、持仓接口与链上余额一致，或相关成交详情齐全；期间暂停新挂单，不用旧文件或零持仓替代失败的读取。 |
+| `HEDGE STARTUP POSITIONS` | 已仅按持仓接口本次返回的份额和均价重建退出任务，随后处理配对及单边缺口；旧文件中的库存、订单与阶段未读入。 |
+| `Startup positions: waiting for Data API and chain balances to agree` | 旧版初始化的严格一致性检查；可能在人工卖出后因接口更新滞后而持续等待。当前 `positions` 初始化已移除此检查，更新代码后重启即可。实际合并仍核对链上可用份额。 |
 | `HEDGE FUNDS` | 可用资金不足；市场暂停继续做市，等待资金满足条件。不会偷偷改成卖出或增加份额。 |
 | `HEDGE SOURCE FAILED` | 提前触发的原始成交永久失败；进入撤 BUY / 确认结算 / 合并配对 / 卖残余恢复，期间不会继续买反向份额。 |
 | `HEDGE RECOVERY WAIT` | 残余 SELL 的可用余额未同步、份额太小或不满足最小量；保留真实持仓等待，不凑量。 |
@@ -139,7 +139,7 @@ grep -E 'HEDGE FILL|HEDGE MERGED' data/bot1/trades.log
 - [Fees](https://docs.polymarket.com/trading/fees)：主动成交费用说明。
 - [SDK Changelog](https://docs.polymarket.com/changelog/sdks)：Python `0.9.0` 的 asset/condition 别名、新协议订单和合并支持。
 - [Get Order Book](https://docs.polymarket.com/api-reference/market-data/get-order-book)：`No orderbook exists for the requested token id` 是订单簿接口的 404 错误；与请求超时、限流或其他 404 分开处理。
-- [Get Current Positions](https://docs.polymarket.com/api-reference/core/get-current-positions-for-a-user)：当前持仓的 `asset`、`conditionId`、`size`、`avgPrice`；本项目固定 SDK 版本映射为 `asset_id` / `token_id`、`condition_id`、`size`、`avg_price`，启动时另行核对链上余额。
+- [Get Current Positions](https://docs.polymarket.com/api-reference/core/get-current-positions-for-a-user)：当前持仓的 `asset`、`conditionId`、`size`、`avgPrice`；本项目固定 SDK 版本映射为 `asset_id` / `token_id`、`condition_id`、`size`、`avg_price`。
 
 离线验证命令：
 
