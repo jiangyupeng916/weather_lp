@@ -104,6 +104,7 @@ grep -E 'HEDGE FILL|HEDGE MERGED' data/bot1/trades.log
 
 | 状态 / 日志 | 含义与处理 |
 | --- | --- |
+| `HEDGE RETRY ... missing_orderbook=1/3` | 接口返回 `No orderbook exists for the requested token id`（订单簿不存在）。同一市场、同一 token 在持续不可用期间最多输出 3 条；第 3 条提示后续同类日志静默。后台仍按原周期检查，订单簿恢复后清零计数并输出 `HEDGE BOOK RESTORED`，下单、成交对账和合并可继续；不会清除持仓或把任务标为完成。计数仅影响日志，进程重启后重新计数，其他错误仍照常报告。 |
 | `HEDGE FUNDS` | 可用资金不足；市场暂停继续做市，等待资金满足条件。不会偷偷改成卖出或增加份额。 |
 | `HEDGE SOURCE FAILED` | 提前触发的原始成交永久失败；进入撤 BUY / 确认结算 / 合并配对 / 卖残余恢复，期间不会继续买反向份额。 |
 | `HEDGE RECOVERY WAIT` | 残余 SELL 的可用余额未同步、份额太小或不满足最小量；保留真实持仓等待，不凑量。 |
@@ -129,6 +130,7 @@ grep -E 'HEDGE FILL|HEDGE MERGED' data/bot1/trades.log
 - [Manage Positions](https://docs.polymarket.com/trading/positions/manage)：等量 outcome 合并、明确基础单位、授权及确认要求。
 - [Fees](https://docs.polymarket.com/trading/fees)：主动成交费用说明。
 - [SDK Changelog](https://docs.polymarket.com/changelog/sdks)：Python `0.9.0` 的 asset/condition 别名、新协议订单和合并支持。
+- [Get Order Book](https://docs.polymarket.com/api-reference/market-data/get-order-book)：`No orderbook exists for the requested token id` 是订单簿接口的 404 错误；与请求超时、限流或其他 404 分开处理。
 
 离线验证命令：
 

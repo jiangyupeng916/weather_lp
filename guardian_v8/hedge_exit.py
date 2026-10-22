@@ -20,6 +20,7 @@ log = logging.getLogger("guardian.hedge")
 ZERO = Decimal(0)
 ONE = Decimal(1)
 UNIT = Decimal("0.000001")
+MISSING_BOOK_LOG_LIMIT = 3
 
 
 def value(obj, name, *aliases, default=None):
@@ -200,6 +201,7 @@ class HedgeExit:
         self._snapshot_lock = threading.Lock()
         self._blocked_tokens = set()
         self._owned_orders = set(self.state["owned_orders"])
+        self._missing_book_logs = {}
         self.last_poll = 0.0
         self._persist()
 
@@ -463,6 +465,27 @@ class HedgeExit:
         self.last_poll = now
         self._persist()
 
+    def _order_book(self, condition, token):
+        """Limit missing-book logs, while keeping recovery checks running."""
+        key = (condition, token)
+        try:
+            book = self.client.get_order_book(token_id=token)
+        except Exception as exc:
+            if "no orderbook exists for the requested token id" not in str(exc).lower():
+                raise
+            count = self._missing_book_logs.get(key, 0)
+            if count < MISSING_BOOK_LOG_LIMIT:
+                count += 1
+                self._missing_book_logs[key] = count
+                suffix = ("; further identical errors suppressed; background checks continue"
+                          if count == MISSING_BOOK_LOG_LIMIT else "")
+                log.error("[HEDGE RETRY] condition=%s token=%s missing_orderbook=%s/%s%s | %s",
+                          condition, token, count, MISSING_BOOK_LOG_LIMIT, suffix, exc)
+            return None
+        if self._missing_book_logs.pop(key, None):
+            log.info("[HEDGE BOOK RESTORED] condition=%s token=%s", condition, token)
+        return book
+
     def step(self):
         if self.fatal or self.stopping.is_set():
             return
@@ -701,7 +724,9 @@ class HedgeExit:
         inv = market["inventory"][token]
         forced = bool(self.cfg.max_hold_enabled and
                       time.time() - inv["first"] >= self.cfg.max_hold_hours * 3600)
-        book = self.client.get_order_book(token_id=token)
+        book = self._order_book(condition, token)
+        if book is None:
+            return
         immediate = market["sell_immediate"]
         levels = book.bids if immediate else book.asks
         prices = [dec(p.price) for p in levels if dec(p.size) > 0]
@@ -798,8 +823,12 @@ class HedgeExit:
         forced = bool(self.cfg.max_hold_enabled and
                       time.time() - inv["first"] >= self.cfg.max_hold_hours * 3600)
         passive = not market["immediate"] and not forced
-        original_book = self.client.get_order_book(token_id=source)
-        opposite_book = self.client.get_order_book(token_id=opposite)
+        original_book = self._order_book(condition, source)
+        if original_book is None:
+            return
+        opposite_book = self._order_book(condition, opposite)
+        if opposite_book is None:
+            return
         entry = dec(inv["cost"]) / dec(inv["qty"])
         gap = self.cfg.sell_position_gap if passive else self.cfg.sell_min_bid_gap
         shares = need.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
