@@ -63,6 +63,10 @@ def test_current_unequal_sides_only_buy_the_net_shortfall(live):
     engine, client, sdk = live
     holdings(client, sdk, no="7")
     activate(engine)
+    assert sdk.merges == [("condition", D(7))] and not sdk.prepared
+    sdk.tx_state = "STATE_CONFIRMED"
+    sdk.wallet_balances = (D(13), D(0))
+    engine.step()
     assert sdk.prepared[0]["shares"] == "13.00"
 
 
@@ -86,6 +90,10 @@ def test_all_position_pages_are_included_before_netting(live, monkeypatch):
     pages = [NS(items=[p]) for p in client.positions]
     monkeypatch.setattr(client, "list_positions", lambda **kwargs: pages)
     activate(engine)
+    assert sdk.merges == [("condition", D(7))] and not sdk.prepared
+    sdk.tx_state = "STATE_CONFIRMED"
+    sdk.wallet_balances = (D(13), D(0))
+    engine.step()
     assert sdk.prepared[0]["shares"] == "13.00"
 
 

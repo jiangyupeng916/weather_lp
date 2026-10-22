@@ -265,15 +265,18 @@ def test_two_original_sides_net_before_buy(env):
     assert sdk.merges == [("condition", D(20))]
 
 
-def test_partial_fill_cancel_buys_only_remaining_before_merging(env):
+def test_partial_fill_cancel_merges_filled_pairs_then_buys_only_remaining(env):
     engine, client, sdk = env
     market = fill_source(engine)
     engine.step()
     confirm_hedge(engine, client, qty="12", canceled=True)
     engine.step()
+    assert sdk.merges == [("condition", D(12))] and len(sdk.prepared) == 1
+    sdk.tx_state = "STATE_CONFIRMED"
+    sdk.wallet_balances = (D(8), D(0))
+    engine.step()
     assert sdk.prepared[-1]["shares"] == "8.00"
     assert sdk.prepared[-1]["passive"] is True
-    assert not sdk.merges
 
 
 def test_cancel_race_waits_for_unsettled_fill(env):
@@ -289,8 +292,11 @@ def test_cancel_race_waits_for_unsettled_fill(env):
     assert not sdk.merges
     client.trades["late"]["status"] = "CONFIRMED"
     engine.step()
+    assert sdk.merges == [("condition", D(6))] and len(sdk.prepared) == 1
+    sdk.tx_state = "STATE_CONFIRMED"
+    sdk.wallet_balances = (D(14), D(0))
+    engine.step()
     assert sdk.prepared[-1]["shares"] == "14.00"
-    assert not sdk.merges
 
 
 def test_self_cross_prevention_cancels_reward_and_accounts_late_fill(env):

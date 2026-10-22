@@ -783,15 +783,45 @@ class HedgeExit:
         market["tx"].update(id=handle.transaction_id, hash=handle.transaction_hash)
         self._persist()
 
-    def _merge_pairs(self, condition, market, quantities):
-        if market["order"] or self._waiting(condition) or min(quantities) < UNIT:
-            return
-        shares = min(quantities).quantize(UNIT, rounding=ROUND_DOWN)
-        # Wait for actual onchain tokens only at merge time.
-        if min(self.sdk.balances(condition)) >= shares:
-            self._submit_transaction(condition, market, shares, self.sdk.approved(condition))
-        else:
-            log.debug("[HEDGE WAIT_BALANCE] condition=%s paired shares=%s", condition, shares)
+    def _merge_pairs(self, condition, market):
+        """Merge confirmed available pairs, preserving a live BUY's reservation."""
+        if market["tx"]:
+            return True
+        order = market["order"]
+        if order and (order.get("side", "BUY") != "BUY" or order["state"] != "live"
+                      or order.get("canceling") or order.get("unsettled")):
+            return False
+        if self._waiting(condition) or market["draining_orders"]:
+            return False
+        # Provisional MATCHED source legs must never become mergeable inventory.
+        quantities = [dec(market["inventory"][t]["qty"]) for t in market["tokens"]]
+        paired = min(quantities)
+        if paired < UNIT:
+            return False
+        if order:
+            gap = quantities[0] - quantities[1]
+            target = market["tokens"][1 if gap > 0 else 0]
+            confirmed = dec(self.state["fills"].get(order["id"], {}).get("CONFIRMED", "0"))
+            if dec(order["shares"]) - confirmed != abs(gap) or (gap and order["token"] != target):
+                return False  # let normal order handling reconcile the changed target first
+        try:
+            shares = min(paired, *self.sdk.balances(condition)).quantize(UNIT, rounding=ROUND_DOWN)
+            if shares < UNIT:
+                log.debug("[HEDGE WAIT_BALANCE] condition=%s paired shares=%s", condition, paired)
+                return False
+            approved = self.sdk.approved(condition)
+        except Exception as exc:
+            # A read-only merge check must not disable normal BUY maintenance.
+            # Submission/persistence failures below still keep their reservations.
+            log.error("[HEDGE MERGE RETRY] condition=%s | %s", condition, exc)
+            return False
+        # A BUY reserves collateral, not the held outcome tokens. Burning equal
+        # YES/NO amounts does not change its remaining gap or its signed shares.
+        self._submit_transaction(condition, market, shares, approved)
+        if market["tx"] and market["tx"]["kind"] == "merge":
+            log.info("[HEDGE MERGE SUBMITTED] condition=%s shares=%s retained_buy=%s",
+                     condition, shares, order["id"] if order else "none")
+        return market["tx"] is not None
 
     def _recover_market(self, condition, market):
         """A source FAILED: settle/cancel buys, merge confirmed pairs, sell surplus.
@@ -813,7 +843,7 @@ class HedgeExit:
             if order:
                 self._cancel(market)
             else:
-                self._merge_pairs(condition, market, quantities)
+                self._merge_pairs(condition, market)
             return
         if max(quantities) == 0 and not order:
             market["recover_sell"], market["sell_immediate"], market["next_quote"] = False, True, 0
@@ -882,6 +912,13 @@ class HedgeExit:
             self._post(market)
 
     def _step_market(self, condition, market):
+        if market["tx"] and market.get("recover_sell"):
+            order = market["order"]
+            if (order and order.get("side", "BUY") == "BUY" and order["state"] == "live"
+                    and not order.get("canceling")):
+                # A source FAILED while a partial merge was in flight. Stop the
+                # still-resting BUY now, rather than waiting for the merge.
+                self._cancel(market)
         if self._transaction(condition, market) or market["blocked"]:
             return
         self._reservation(market)
@@ -895,6 +932,10 @@ class HedgeExit:
             return
         if market.get("recover_sell"):
             self._recover_market(condition, market)
+            return
+        # Recycle filled pairs before the next quote or funding check, even
+        # while the unfilled remainder of a verified BUY is still resting.
+        if self._merge_pairs(condition, market):
             return
         tokens = market["tokens"]
         positions = self._positions(condition, market)  # quiesce may ingest a late source fill
@@ -921,7 +962,6 @@ class HedgeExit:
                 log.warning("[HEDGE DUST] condition=%s residual=%s below share precision", condition, need)
                 market["next_quote"] = time.time() + self.cfg.position_interval
                 self._persist()
-            self._merge_pairs(condition, market, quantities)
             return
         if time.time() < market["next_quote"]:
             return
@@ -946,7 +986,6 @@ class HedgeExit:
                 self._cancel(market)
             else:
                 self._persist()
-                self._merge_pairs(condition, market, quantities)
             if shares < minimum:
                 log.warning("[HEDGE DUST] condition=%s residual=%s minimum=%s; never round shares up",
                             condition, need, minimum)
@@ -966,7 +1005,6 @@ class HedgeExit:
         if dec(collateral.balance) / 1_000_000 < price * shares:
             log.error("[HEDGE FUNDS] condition=%s insufficient collateral for %s shares", condition, shares)
             self._persist()
-            self._merge_pairs(condition, market, quantities)
             return
         signed, order_id = self.sdk.prepare(condition, opposite, price, shares, passive, forced)
         market["order"] = {
