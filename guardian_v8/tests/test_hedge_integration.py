@@ -37,6 +37,15 @@ def test_matched_trigger_is_opt_in_and_validated(monkeypatch):
         config(hedge_trigger="invalid").validate()
 
 
+def test_startup_defaults_to_live_positions_and_resume_remains_available(monkeypatch):
+    monkeypatch.delenv("HEDGE_STARTUP_MODE", raising=False)
+    assert Config().hedge_startup_mode == "positions"
+    monkeypatch.setenv("HEDGE_STARTUP_MODE", "resume")
+    assert Config().hedge_startup_mode == "resume"
+    with pytest.raises(EnvironmentError, match="HEDGE_STARTUP_MODE"):
+        config(hedge_startup_mode="invalid").validate()
+
+
 def test_mode_requires_relayer_pair_and_valid_values():
     with pytest.raises(EnvironmentError, match="EXIT_MODE"):
         config(exit_mode="typo").validate()

@@ -2,7 +2,9 @@
 
 `EXIT_MODE=hedge_merge` 根据已成交的份额买入同一市场的相反 outcome，再把确认的等量 YES、NO 合并成抵押资产。触发点由 `HEDGE_TRIGGER` 选择：默认 `confirmed` 等成交确认；`matched` 提前到撮合事件。原模式 `EXIT_MODE=sell` 仍为默认值。
 
-本次仅增加退出方式，不更改奖励市场筛选、步长筛选或 midpoint 区间参数。未修改真实 `.env`，未运行实盘订单。改动前 Git 基线为 `bd4bad2`。
+**当前默认启动方式为 `HEDGE_STARTUP_MODE=positions`**：每次启动归档上次本地记录，从账户当前持仓、实际均价及链上余额重新建立退出任务。已有 YES/NO 等量配对可合并；单边净缺口继续按原阈值买入相反方向。人工清理后的真实余额会成为新基准，不继续重发旧文件中的订单。
+
+本次启动方式与日志限制修改前的代码保存在 Git 提交 `3172197`。未修改真实 `.env`，未运行实盘订单。
 
 ### MATCHED 提前触发（可选）
 
@@ -37,18 +39,21 @@ HEDGE_TRIGGER=matched
 
 ## 2. 启用
 
-1. 用原 `sell` 模式处理遗留持仓和旧卖单，再停止实例。首次切换时不能带旧持仓：延迟的持仓快照与历史成交重播无法直接相加，否则可能重复买入。检测到旧仓或未结算交易时，新模式暂停，不会默默接管。
+1. 停止旧实例；如需人工清理，先完成清理并核实已有链上交易终态。默认 `positions` 模式可以接管当前持仓：启动先撤账户现存 BUY/SELL 订单，核实撤单及相关成交已结算，再读取持仓接口的份额和均价，与链上余额逐项对照。连续两次快照一致后才恢复新挂单；快照前后的近期成交及旧单相关成交仅用于核对和去重，不再次加到快照份额中。持仓接口滞后、均价缺失或仍有在途成交时继续等待，不按空仓处理。
 2. 更新代码及依赖。当前安装依赖为 `polymarket-client==0.9.0`，服务器已经是 `0.9.0` 时无需降级。适配器也保留已核验的 `0.5.0` 兼容路径；其他未经验证的版本会在新模式启动时明确拒绝运行。此前仅允许 `0.5.0` 的版本检查已修正，不要手动删除检查来绕过适配。
 3. 在对应 `.env.botN` 添加：
 
 ```dotenv
 EXIT_MODE=hedge_merge
 HEDGE_TRIGGER=matched
+HEDGE_STARTUP_MODE=positions
 HEDGE_POLL_INTERVAL=5
 SELL_MIN_BID_GAP=0.02
 SELL_POSITION_GAP=0.02
 # MAX_HOLD_ENABLED / MAX_HOLD_HOURS 继续控制超时退出
 ```
+
+`HEDGE_STARTUP_MODE` 不配置时也是 `positions`，无需修改现有 `.env` 即采用新方式。设为 `resume` 可选择原来的本地记录恢复方式：完整接续之前的签名、在途交易与暂记成交；没有记录时仍要求干净账户首次启用。默认 `positions` 只重建实际库存及成本，不恢复旧任务的阶段、暂记成交或持仓计时，已有持仓的超时计时从此次快照重新开始。重新建立的单边持仓按正常反向买入规则退出；若需要接续原成交 FAILED 后的残余 SELL 阶段，应选 `resume`。
 
 账户还需有效的 `RELAYER_API_KEY` 和 `RELAYER_API_KEY_ADDRESS`（现有 `POLYMARKET_*` 别名仍可用）。原来只配 `PK + PROXY_ADDRESS` 的旧账户，需要补齐 Relayer 凭据才能采用此退出方式。
 
@@ -72,7 +77,7 @@ python main.py bot1
 - 普通市场与 negative-risk 市场使用 SDK 的市场上下文、token 映射和合并路由；不会把同一事件下不同问题的 YES / NO 错配。合并前查询链上余额和 operator approval，必要时先授权。
 - 授权查询和授权写入使用实际 token ledger：普通及负风险 CTF 均在 Conditional Tokens 上授权对应 collateral adapter，Protocol V2 在 PositionManager 上授权 Router。旧负风险 Adapter 可转发 `balanceOfBatch`，但不能用它调用 `isApprovedForAll` / `setApprovalForAll`；SDK 的余额读取目标不能直接当作授权目标。
 - 合并数量是明确的六位小数基础单位，绝不使用 `amount="max"`。同一钱包同时只允许一笔授权/合并交易在途，等待 Relayer `STATE_CONFIRMED` 后才从账本扣除配对份额。
-- 合并已返回交易 ID 时，重启继续查询同一笔交易；不会重复提交。关闭顺序为停止退出工作线程、等待奖励写请求结束、最后撤单，持久化记录保留用于下次恢复。
+- 同次运行内，合并已返回交易 ID 时持续查询同一笔交易，不重复提交；`resume` 启动也接续该 ID。默认 `positions` 启动以现场持仓重建，不接续旧交易 ID，因此此前已提交的链上交易须先核实终态，避免快照之后又改变库存。关闭顺序为停止退出工作线程、等待奖励写请求结束、最后撤单。
 
 ## 4. 状态文件和排查
 
@@ -82,9 +87,9 @@ python main.py bot1
 guardian_v8/data/hedge_exit/<钱包地址小写>.json
 ```
 
-使用原子替换、fsync 和进程锁。此目录已排除在 Git 外。文件含可重发的已签订单，**需要保留并妥善备份，不要上传或在聊天中粘贴完整内容**。换机器必须连同状态迁移；同钱包换实例名不应新建另一份状态。
+使用原子替换、fsync 和进程锁。此目录已排除在 Git 外。文件含可重发的已签订单，**需要保留并妥善备份，不要上传或在聊天中粘贴完整内容**。默认启动先取得同一钱包的进程锁，把旧文件原样移动到 `data/hedge_exit/archive/<钱包>.<时间戳>.json`，不解析其内容；归档失败则停止初始化，不覆盖旧文件。同钱包换实例名仍使用同一活动路径及进程锁。若选择 `resume` 或迁移未完成任务，需连同状态迁移。
 
-本次自动将旧 version 1 状态升级为 version 2，保留原库存、订单签名、交易 ID 与去重记录，增加暂记成交和残余卖出状态。旧代码会拒绝读取 version 2，避免误忽略提前触发的份额；不要手工改版本号或拿旧状态覆盖恢复。暂记成交未结束时也不能切回 `HEDGE_TRIGGER=confirmed`。状态命令分开展示 `inventory`、`provisional` 和 `recover_sell`，不会把暂记份额显示成可合并的已到账持仓。
+当前记录格式为 version 2；`resume` 兼容读取 version 1，保留原库存、订单签名、交易 ID 与去重记录，并增加暂记成交和残余卖出状态。较早代码会拒绝读取 version 2；不要手工改版本号。在 `resume` 模式下，暂记成交未结束时不能切回 `HEDGE_TRIGGER=confirmed`。状态命令展示 `startup_mode`、初始化时尚待核实的 `startup_orders`、真实 `inventory`、`provisional` 和 `recover_sell`，不把暂记份额当作已到账持仓。
 
 下面的命令只读本地状态，不读取私钥、不连接交易所，也不输出签名：
 
@@ -105,12 +110,15 @@ grep -E 'HEDGE FILL|HEDGE MERGED' data/bot1/trades.log
 | 状态 / 日志 | 含义与处理 |
 | --- | --- |
 | `HEDGE RETRY ... missing_orderbook=1/3` | 接口返回 `No orderbook exists for the requested token id`（订单簿不存在）。同一市场、同一 token 在持续不可用期间最多输出 3 条；第 3 条提示后续同类日志静默。后台仍按原周期检查，订单簿恢复后清零计数并输出 `HEDGE BOOK RESTORED`，下单、成交对账和合并可继续；不会清除持仓或把任务标为完成。计数仅影响日志，进程重启后重新计数，其他错误仍照常报告。 |
+| `HEDGE ORDER UNKNOWN ... minimum_amount=1/3` | `invalid amount for a marketable BUY order (...), min size: ...`：订单金额未达到接口要求。同一订单最多输出 3 条此类报错，之后静默；同次运行仍保留订单预留、对账并只重发原签名，不自动扩大份额。其他下单异常正常报告。 |
+| `HEDGE STARTUP POSITIONS` | 已按最新持仓重建退出任务，开始处理当前配对及单边缺口；旧文件中的库存、订单与阶段未读入。 |
+| `Startup positions: waiting ...` | 等待旧单成交终态、持仓接口与链上余额一致，或相关成交详情齐全；期间暂停新挂单，不用旧文件或零持仓替代失败的读取。 |
 | `HEDGE FUNDS` | 可用资金不足；市场暂停继续做市，等待资金满足条件。不会偷偷改成卖出或增加份额。 |
 | `HEDGE SOURCE FAILED` | 提前触发的原始成交永久失败；进入撤 BUY / 确认结算 / 合并配对 / 卖残余恢复，期间不会继续买反向份额。 |
 | `HEDGE RECOVERY WAIT` | 残余 SELL 的可用余额未同步、份额太小或不满足最小量；保留真实持仓等待，不凑量。 |
 | `HEDGE DUST` | 净缺口小于订单簿最小份额，或不足 0.01 份的精度；不向上凑量。可配对部分可合并，剩余零头保留，需要后续对账处理。 |
 | `HEDGE ORDER UNKNOWN` | 下单结果不明；保留预留，核实同一订单。不会因为一次查不到就新建另一笔。 |
-| `Transaction submission unknown` | 授权/合并请求响应丢失，尚无可核对的交易 ID。该市场停止继续买入/合并；先核实 Relayer 历史、链上交易及余额，再修复记录。单纯重启不会解除，不能靠删除状态“重试”。 |
+| `Transaction submission unknown` | 授权/合并请求响应丢失，尚无可核对的交易 ID。该市场停止继续买入/合并；先核实 Relayer 历史、链上交易及余额。`resume` 重启不会解除冻结；`positions` 会重新取现场持仓，但不能仅靠重启判断旧链上提交已经失败，须先核实其终态。 |
 | `HEDGE PAUSED` / `HEDGE JOURNAL` | 数据读取或状态保存失败；暂停新奖励挂单。先修复网络、凭据或磁盘问题，再恢复。 |
 | `Approval query failed` | 授权只读查询失败，日志附带 ledger/operator；不会把失败当作“未授权”并盲目发送交易。旧版在负风险 CTF 市场可能把授权查到 Neg Risk Adapter 并反复 `eth_call ... execution reverted`，请更新代码、保留状态文件后重启；不需要降级 SDK。 |
 | `Hedge execution exceeds reserved shares` / `inventory conflict` | 实际执行与账本不一致；冻结该市场，不用反向循环买入掩盖差额。需核对外部交易。 |
@@ -131,6 +139,7 @@ grep -E 'HEDGE FILL|HEDGE MERGED' data/bot1/trades.log
 - [Fees](https://docs.polymarket.com/trading/fees)：主动成交费用说明。
 - [SDK Changelog](https://docs.polymarket.com/changelog/sdks)：Python `0.9.0` 的 asset/condition 别名、新协议订单和合并支持。
 - [Get Order Book](https://docs.polymarket.com/api-reference/market-data/get-order-book)：`No orderbook exists for the requested token id` 是订单簿接口的 404 错误；与请求超时、限流或其他 404 分开处理。
+- [Get Current Positions](https://docs.polymarket.com/api-reference/core/get-current-positions-for-a-user)：当前持仓的 `asset`、`conditionId`、`size`、`avgPrice`；本项目固定 SDK 版本映射为 `asset_id` / `token_id`、`condition_id`、`size`、`avg_price`，启动时另行核对链上余额。
 
 离线验证命令：
 

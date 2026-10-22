@@ -182,6 +182,7 @@ class Guardian:
         logger.info("成交退出模式: %s", self.cfg.exit_mode)
         if self.hedge_exit is not None:
             logger.info("反向买入触发状态: %s", self.cfg.hedge_trigger)
+            logger.info("退出启动方式: %s", self.cfg.hedge_startup_mode)
         logger.info("=" * 60)
 
     # ── 信号处理 ──────────────────────────────────────────────────────────────

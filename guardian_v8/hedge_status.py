@@ -27,6 +27,8 @@ def summarize(state):
         })
     return {"wallet": state["wallet"], "enabled": state["enabled"],
             "trigger": state.get("trigger", "confirmed"),
+            "startup_mode": state.get("startup_mode", "resume"),
+            "startup_orders": state.get("startup_orders", {}),
             "initialized": state["initialized"],
             "pending_trades": state["pending_trades"], "markets": markets}
 

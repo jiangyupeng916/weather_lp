@@ -234,6 +234,8 @@ class Config:
     exit_mode: str = field(default_factory=lambda: os.environ.get("EXIT_MODE", "sell").strip().lower())
     hedge_trigger: str = field(
         default_factory=lambda: os.environ.get("HEDGE_TRIGGER", "confirmed").strip().lower())
+    hedge_startup_mode: str = field(
+        default_factory=lambda: os.environ.get("HEDGE_STARTUP_MODE", "positions").strip().lower())
     hedge_poll_interval: float = field(
         default_factory=lambda: float(os.environ.get("HEDGE_POLL_INTERVAL", "5")))
     position_threshold: float = 1.0
@@ -300,6 +302,8 @@ class Config:
             raise EnvironmentError("EXIT_MODE 只允许 sell / hedge_merge")
         if self.hedge_trigger not in ("confirmed", "matched"):
             raise EnvironmentError("HEDGE_TRIGGER 只允许 confirmed / matched")
+        if self.hedge_startup_mode not in ("positions", "resume"):
+            raise EnvironmentError("HEDGE_STARTUP_MODE 只允许 positions / resume")
         if not 1 <= self.hedge_poll_interval <= 60:
             raise EnvironmentError("HEDGE_POLL_INTERVAL 必须在 1～60 秒之间")
         if self.exit_mode == "hedge_merge":

@@ -160,7 +160,7 @@ class PaperSDK:
 def env(tmp_path):
     client = PaperClient()
     sdk = PaperSDK(client)
-    cfg = NS(hedge_poll_interval=5, position_interval=120, max_hold_enabled=False,
+    cfg = NS(hedge_poll_interval=5, hedge_startup_mode="resume", position_interval=120, max_hold_enabled=False,
              max_hold_hours=4, sell_min_bid_gap=D("0.02"), sell_position_gap=D("0.02"))
     engine = HedgeExit(client, cfg, tmp_path / "state.json", lambda: None, sdk=sdk)
     engine.state.update(initialized=True, since=0)

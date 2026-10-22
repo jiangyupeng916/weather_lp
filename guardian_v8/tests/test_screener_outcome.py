@@ -87,7 +87,7 @@ def test_validate_rejects_invalid_outcome():
         "relayer_api_key": None,
         "relayer_api_key_address": None,
         "screener_outcome": "invalid",
-        "exit_mode": "sell", "hedge_poll_interval": 5, "hedge_trigger": "confirmed",
+        "exit_mode": "sell", "hedge_poll_interval": 5, "hedge_trigger": "confirmed", "hedge_startup_mode": "positions",
     }.items():
         object.__setattr__(c, k, v)
     with pytest.raises(EnvironmentError):
@@ -106,7 +106,7 @@ def test_validate_accepts_valid_outcome():
             "relayer_api_key": None,
             "relayer_api_key_address": None,
             "screener_outcome": ok,
-            "exit_mode": "sell", "hedge_poll_interval": 5, "hedge_trigger": "confirmed",
+            "exit_mode": "sell", "hedge_poll_interval": 5, "hedge_trigger": "confirmed", "hedge_startup_mode": "positions",
         }.items():
             object.__setattr__(c, k, v)
         c.validate()  # 不抛异常即通过

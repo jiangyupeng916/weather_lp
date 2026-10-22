@@ -20,7 +20,7 @@ log = logging.getLogger("guardian.hedge")
 ZERO = Decimal(0)
 ONE = Decimal(1)
 UNIT = Decimal("0.000001")
-MISSING_BOOK_LOG_LIMIT = 3
+REPEATED_ERROR_LOG_LIMIT = 3
 
 
 def value(obj, name, *aliases, default=None):
@@ -90,7 +90,7 @@ def hedge_quote(book, opposite_book, entry, gap, passive=False, forced=False, sh
 
 
 def has_exposure(state):
-    return bool(state.get("pending_trades") or state.get("pending_legs")) or any(
+    return bool(state.get("pending_trades") or state.get("pending_legs") or state.get("startup_orders")) or any(
         m.get("order") or m.get("tx") or m.get("blocked") or m.get("draining_orders")
         or m.get("recover_sell")
         or any(dec(p["qty"]) != 0 for p in m["inventory"].values())
@@ -142,6 +142,16 @@ class Journal:
             finally:
                 os.close(fd)
 
+    def archive(self):
+        """Keep the previous bytes for audit, without reading them as state."""
+        if not self.path.exists():
+            return None
+        folder = self.path.parent / "archive"
+        folder.mkdir(mode=0o700, exist_ok=True)
+        destination = folder / f"{self.path.stem}.{time.time_ns()}.json"
+        os.replace(self.path, destination)
+        return destination
+
     def close(self):
         self.lock.close()
 
@@ -170,7 +180,21 @@ class HedgeExit:
         self.journal = Journal(path)
         self.address = str(client.wallet).lower()
         self.owner = str(client.credentials.key)
-        previous = self.journal.read()
+        self.startup_mode = getattr(cfg, "hedge_startup_mode", "positions")
+        if self.startup_mode not in ("positions", "resume"):
+            self.journal.close()
+            raise ValueError("Invalid hedge startup mode")
+        try:
+            if self.startup_mode == "positions":
+                archived = self.journal.archive()
+                previous = None
+                if archived:
+                    log.info("[HEDGE STARTUP] Previous journal archived: %s", archived)
+            else:
+                previous = self.journal.read()
+        except Exception:
+            self.journal.close()
+            raise
         if previous and previous["wallet"] != self.address:
             self.journal.close()
             raise RuntimeError("Hedge journal belongs to another wallet")
@@ -179,7 +203,10 @@ class HedgeExit:
             "initialized": False, "since": int(time.time()), "cursor": 0,
             "markets": {}, "seen": {}, "fills": {}, "owned_orders": {},
             "pending_trades": {}, "terminal_trades": {},
+            "startup_mode": self.startup_mode, "startup_orders": {},
         }
+        self.state.setdefault("startup_mode", "resume")
+        self.state.setdefault("startup_orders", {})
         self.trigger = getattr(cfg, "hedge_trigger", "confirmed")
         self.state.setdefault("pending_legs", {})
         if (self.state.get("trigger", "confirmed") != self.trigger
@@ -202,6 +229,9 @@ class HedgeExit:
         self._blocked_tokens = set()
         self._owned_orders = set(self.state["owned_orders"])
         self._missing_book_logs = {}
+        self._small_buy_logs = {}
+        self._startup_after = int(time.time()) - 600
+        self._startup_sample = None
         self.last_poll = 0.0
         self._persist()
 
@@ -269,6 +299,13 @@ class HedgeExit:
             self.wake.clear()
 
     def _bootstrap(self):
+        if self.state["startup_mode"] == "positions":
+            try:
+                self._bootstrap_positions()
+            except Exception:
+                self._startup_sample = None
+                raise
+            return
         # Migrating an account with old positions using a delayed Data API
         # snapshot would double-count trades. Require a clean activation once.
         start = int(time.time())
@@ -292,6 +329,132 @@ class HedgeExit:
         self.state["cursor"] = start
         self.state["initialized"] = True
         self._persist()
+
+    def _startup_trades(self):
+        """Read recent trades plus every fill attached to a canceled old order."""
+        rows = {}
+        queries = [{"after": str(self._startup_after)}]
+        associated = {tid for order in self.state["startup_orders"].values() for tid in order["trades"]}
+        queries.extend({"id": tid} for tid in sorted(associated))
+        for query in queries:
+            found = False
+            for page in self.client.list_account_trades(**query):
+                for event in page.items:
+                    if not list(own_legs(event, self.address, self.owner)):
+                        continue
+                    found = True
+                    tid = str(value(event, "id", default=""))
+                    if not tid or status_of(event) not in ("CONFIRMED", "FAILED"):
+                        self._startup_sample = None
+                        raise RuntimeError("Startup positions: waiting for in-flight trade settlement")
+                    rows[(tid, value(event, "bucket_index", default=0))] = event
+            if "id" in query and not found:
+                self._startup_sample = None
+                raise RuntimeError("Startup positions: waiting for canceled order trade details")
+        return rows
+
+    def _bootstrap_positions(self):
+        """Rebuild from a quiet, chain-checked position snapshot, never old orders."""
+        def fingerprint(rows):
+            return {key: (status_of(event), tuple(own_legs(event, self.address, self.owner)))
+                    for key, event in rows.items()}
+
+        # Until initialized, blocks() prevents all new reward placements. Cancel
+        # old BUY/SELL orders before measuring exposure so they cannot fill later.
+        open_orders = [o for page in self.client.list_open_orders() for o in page.items]
+        for order in open_orders:
+            self.state["startup_orders"].setdefault(str(order.id), {
+                "condition": str(value(order, "condition_id", "market", default="")),
+                "trades": list(order.associate_trades),
+            })
+        if open_orders:
+            self._startup_sample = None
+            self._persist()
+            for order in open_orders:
+                self.sdk.cancel(str(order.id))
+            return
+        for oid in self.state["startup_orders"]:
+            order = self.client.get_order(order_id=oid)
+            terminal = str(order.status).upper() in ("CANCELED", "CANCELLED", "EXPIRED", "UNMATCHED")
+            if not terminal and dec(order.size_matched) < dec(order.original_size):
+                self._startup_sample = None
+                return
+            self.state["startup_orders"][oid]["trades"] = list(order.associate_trades)
+            if dec(order.size_matched) > 0 and not order.associate_trades:
+                self._startup_sample = None
+                raise RuntimeError("Startup positions: waiting for canceled order trade IDs")
+
+        start = int(time.time())
+        before = self._startup_trades()
+        before_fingerprint = fingerprint(before)
+        positions = {}
+        conditions = {str(value(e, "condition_id", "market")) for e in before.values()}
+        conditions.update(o["condition"] for o in self.state["startup_orders"].values())
+        for page in self.client.list_positions(size_threshold=0, page_size=100):
+            for pos in page.items:
+                if value(pos, "size") is None:
+                    raise ValueError("Missing startup position size")
+                quantity = dec(value(pos, "size"))
+                if quantity < 0:
+                    raise ValueError("Negative startup position")
+                if quantity == 0:
+                    continue
+                condition = str(value(pos, "condition_id", "conditionId", default=""))
+                token = str(value(pos, "asset_id", "token_id", "asset", default=""))
+                raw_price = value(pos, "avg_price", "avgPrice")
+                if raw_price is None:
+                    raise ValueError("Missing startup position average price")
+                price = dec(raw_price)
+                if not condition or not token or not ZERO <= price <= ONE:
+                    raise ValueError("Incomplete startup position or average price")
+                key = (condition, token)
+                if key in positions:
+                    raise ValueError("Duplicate startup position; retry a stable snapshot")
+                positions[key] = (quantity.quantize(UNIT, rounding=ROUND_DOWN), price)
+                conditions.add(condition)
+        snapshot = {}
+        for condition in sorted(conditions):
+            tokens = tuple(str(t) for t in self.sdk.tokens(condition))
+            if len(tokens) != 2 or tokens[0] == tokens[1]:
+                raise ValueError("Startup requires two distinct outcomes of one condition")
+            if any(cid == condition and token not in tokens for cid, token in positions):
+                raise ValueError("Startup position token does not belong to condition")
+            balances = tuple(dec(q).quantize(UNIT, rounding=ROUND_DOWN) for q in self.sdk.balances(condition))
+            quantities = tuple(positions.get((condition, t), (ZERO, ZERO))[0] for t in tokens)
+            if balances != quantities:
+                self._startup_sample = None
+                raise RuntimeError("Startup positions: waiting for Data API and chain balances to agree")
+            if any(quantities):
+                snapshot[condition] = {t: positions.get((condition, t), (ZERO, ZERO)) for t in tokens}
+        after = self._startup_trades()
+        after_fingerprint = fingerprint(after)
+        if before_fingerprint != after_fingerprint or any(
+                page.items for page in self.client.list_open_orders()):
+            self._startup_sample = None
+            return
+        sample = (snapshot, after_fingerprint)
+        if self._startup_sample != sample:
+            self._startup_sample = sample
+            return  # require two consecutive matching snapshots before any BUY
+
+        # Baseline fills are already represented by the snapshot. Seed dedupe
+        # keys, including same-second / timestamp-less late WS messages.
+        for (tid, bucket), event in after.items():
+            status = status_of(event)
+            self.state["terminal_trades"][tid] = status
+            for oid, token, side, qty, price in own_legs(event, self.address, self.owner):
+                self.state["seen"][f"{tid}:{bucket}:{oid}:{token}:{side}"] = status
+                totals = self.state["fills"].setdefault(oid, {"CONFIRMED": "0", "FAILED": "0"})
+                totals[status] = str(dec(totals[status]) + qty)
+        for condition, holdings in snapshot.items():
+            market = self._market(condition)
+            market["inventory"] = {t: {"qty": str(qty), "cost": str(qty * price),
+                                        "first": start if qty else 0}
+                                   for t, (qty, price) in holdings.items()}
+        self.state.update(initialized=True, since=start, cursor=start, startup_orders={})
+        self.last_poll = time.time()
+        self._persist()
+        log.info("[HEDGE STARTUP POSITIONS] Rebuilt %s markets from current positions", len(snapshot))
 
     def _market(self, condition):
         markets = self.state["markets"]
@@ -474,13 +637,13 @@ class HedgeExit:
             if "no orderbook exists for the requested token id" not in str(exc).lower():
                 raise
             count = self._missing_book_logs.get(key, 0)
-            if count < MISSING_BOOK_LOG_LIMIT:
+            if count < REPEATED_ERROR_LOG_LIMIT:
                 count += 1
                 self._missing_book_logs[key] = count
                 suffix = ("; further identical errors suppressed; background checks continue"
-                          if count == MISSING_BOOK_LOG_LIMIT else "")
+                          if count == REPEATED_ERROR_LOG_LIMIT else "")
                 log.error("[HEDGE RETRY] condition=%s token=%s missing_orderbook=%s/%s%s | %s",
-                          condition, token, count, MISSING_BOOK_LOG_LIMIT, suffix, exc)
+                          condition, token, count, REPEATED_ERROR_LOG_LIMIT, suffix, exc)
             return None
         if self._missing_book_logs.pop(key, None):
             log.info("[HEDGE BOOK RESTORED] condition=%s token=%s", condition, token)
@@ -491,6 +654,8 @@ class HedgeExit:
             return
         if not self.state["initialized"]:
             self._bootstrap()
+            if not self.state["initialized"]:
+                return
         while not self.inbox.empty():
             # Do not lose a failed event: REST replay is an additional backstop.
             event = self.inbox.get_nowait()
@@ -606,8 +771,20 @@ class HedgeExit:
         try:
             response = self.sdk.post(order["signed"])
         except Exception as exc:
-            log.error("[HEDGE ORDER UNKNOWN] id=%s | %s", order["id"], exc)
+            message = str(exc).lower()
+            if "invalid amount for a marketable buy order" in message and "min size" in message:
+                count = self._small_buy_logs.get(order["id"], 0)
+                if count < REPEATED_ERROR_LOG_LIMIT:
+                    count += 1
+                    self._small_buy_logs[order["id"]] = count
+                    suffix = ("; further identical errors suppressed; reconciliation continues"
+                              if count == REPEATED_ERROR_LOG_LIMIT else "")
+                    log.error("[HEDGE ORDER UNKNOWN] id=%s minimum_amount=%s/%s%s | %s",
+                              order["id"], count, REPEATED_ERROR_LOG_LIMIT, suffix, exc)
+            else:
+                log.error("[HEDGE ORDER UNKNOWN] id=%s | %s", order["id"], exc)
             return
+        self._small_buy_logs.pop(order["id"], None)
         if response.ok:
             if str(response.order_id).lower() != order["id"].lower():
                 self.state["owned_orders"][str(response.order_id)] = self.state["owned_orders"][order["id"]]

@@ -164,7 +164,7 @@ SCREENER_TICK_SIZE=0.001
 
 新增 `EXIT_MODE=hedge_merge`：BUY 成交后买入同市场相反 outcome 的净缺口份额，再合并确认的等量 YES/NO；默认 `EXIT_MODE=sell` 保持原卖出方式。`SELL_MIN_BID_GAP` / `SELL_POSITION_GAP` 自动按 `1 − 成本 + gap` 转成买价保护上限。`HEDGE_TRIGGER` 默认 `confirmed`，设为 `matched` 可提前到撮合时触发；若原成交最终失败，则先撤未成交的反向买单，待结算核实后合并已有配对部分、按原卖出阈值卖出残余。此选项不改变反向买价公式、轮询、行情缓存或下单流程。
 
-首次启用须先处理遗留持仓和旧卖单，补齐 Relayer 凭据，并安装更新后的依赖。当前依赖为 `polymarket-client==0.9.0`，服务器已经使用此版本时无需降级；适配器也保留已验证的 `0.5.0` 兼容路径。之后重启保留并使用 `data/hedge_exit/<钱包>.json` 恢复。不要删除此状态文件，未完成退出时不能直接切回 sell。
+补齐 Relayer 凭据，并安装更新后的依赖。当前依赖为 `polymarket-client==0.9.0`，服务器已经使用此版本时无需降级；适配器也保留已验证的 `0.5.0` 兼容路径。默认 `HEDGE_STARTUP_MODE=positions`（不设也是此值）：每次重启把旧记录归档到 `data/hedge_exit/archive/`，从当前持仓份额、均价及链上余额重建；先撤旧 BUY/SELL 并核实在途成交，等连续两次快照一致再挂单。已有配对会合并，单边净缺口按原阈值补买，持仓计时重新开始。人工清理应在启动前完成，并先核实此前链上交易终态。设为 `resume` 可恢复原来的记录接续方式；两种方式在运行期间都继续保存当前账本。未完成退出时仍不能直接切回 sell。
 
 完整参数、示例、超时退出差异与故障恢复见 [HEDGE_EXIT.md](HEDGE_EXIT.md)。只读查看进度：`python hedge_status.py`。
 
