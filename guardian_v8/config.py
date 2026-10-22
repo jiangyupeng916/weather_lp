@@ -238,6 +238,8 @@ class Config:
         default_factory=lambda: os.environ.get("HEDGE_STARTUP_MODE", "positions").strip().lower())
     hedge_poll_interval: float = field(
         default_factory=lambda: float(os.environ.get("HEDGE_POLL_INTERVAL", "5")))
+    hedge_merge_scan_interval: float = field(
+        default_factory=lambda: float(os.environ.get("HEDGE_MERGE_SCAN_INTERVAL", "60")))
     position_threshold: float = 1.0
     # 即时卖单（BUY 成交后立即卖）：best_bid < 成交价 - 此值 → 跳过等定时轮询
     sell_min_bid_gap: Decimal = Decimal(os.environ.get("SELL_MIN_BID_GAP", "0.02"))
@@ -306,6 +308,8 @@ class Config:
             raise EnvironmentError("HEDGE_STARTUP_MODE 只允许 positions / resume")
         if not 1 <= self.hedge_poll_interval <= 60:
             raise EnvironmentError("HEDGE_POLL_INTERVAL 必须在 1～60 秒之间")
+        if not (self.hedge_merge_scan_interval == 0 or 5 <= self.hedge_merge_scan_interval <= 86400):
+            raise EnvironmentError("HEDGE_MERGE_SCAN_INTERVAL 必须为 0（关闭）或 5～86400 秒")
         if self.exit_mode == "hedge_merge":
             if not (self.relayer_api_key and self.relayer_api_key_address):
                 raise EnvironmentError("hedge_merge 需要 RELAYER_API_KEY 和 RELAYER_API_KEY_ADDRESS 用于合并")

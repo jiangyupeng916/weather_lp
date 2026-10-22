@@ -92,7 +92,7 @@ def hedge_quote(book, opposite_book, entry, gap, passive=False, forced=False, sh
 def has_exposure(state):
     return bool(state.get("pending_trades") or state.get("pending_legs") or state.get("startup_orders")) or any(
         m.get("order") or m.get("tx") or m.get("blocked") or m.get("draining_orders")
-        or m.get("recover_sell")
+        or m.get("recover_sell") or m.get("merge_scan")
         or any(dec(p["qty"]) != 0 for p in m["inventory"].values())
         for m in state.get("markets", {}).values())
 
@@ -123,7 +123,7 @@ class Journal:
         if not self.path.exists():
             return None
         state = json.loads(self.path.read_text(encoding="utf-8"))
-        if state.get("version") not in (1, 2):
+        if state.get("version") not in (1, 2, 3):
             raise RuntimeError("Unsupported hedge journal; do not delete the journal")
         return state
 
@@ -199,7 +199,7 @@ class HedgeExit:
             self.journal.close()
             raise RuntimeError("Hedge journal belongs to another wallet")
         self.state = previous if previous and previous.get("enabled") else {
-            "version": 2, "enabled": True, "wallet": self.address,
+            "version": 3, "enabled": True, "wallet": self.address,
             "initialized": False, "since": int(time.time()), "cursor": 0,
             "markets": {}, "seen": {}, "fills": {}, "owned_orders": {},
             "pending_trades": {}, "terminal_trades": {},
@@ -213,9 +213,9 @@ class HedgeExit:
                 and any(p.get("early") for p in self.state["pending_legs"].values())):
             self.journal.close()
             raise RuntimeError("Unsettled early hedges: keep HEDGE_TRIGGER=matched until reconciled")
-        # Version 1 inventories, order signatures and dedupe keys are preserved.
-        # Old code rejects version 2 instead of ignoring provisional fills.
-        self.state.update(version=2, trigger=self.trigger)
+        # Preserve older inventories, signatures and dedupe keys. Older code
+        # must reject v3 rather than ignore a refreshed inventory's time fence.
+        self.state.update(version=3, trigger=self.trigger)
         for market in self.state["markets"].values():
             market.setdefault("recover_sell", False)
             market.setdefault("sell_immediate", True)
@@ -231,6 +231,7 @@ class HedgeExit:
         self._missing_book_logs = {}
         self._small_buy_logs = {}
         self.last_poll = 0.0
+        self.last_merge_scan = time.monotonic()
         self._persist()
 
     def _persist(self):
@@ -242,7 +243,7 @@ class HedgeExit:
             raise
         blocked = set()
         for market in self.state["markets"].values():
-            if market["order"] or market["tx"] or market["blocked"] or market["draining_orders"] or market.get("recover_sell") or any(
+            if market["order"] or market["tx"] or market["blocked"] or market["draining_orders"] or market.get("recover_sell") or market.get("merge_scan") or any(
                     dec(p["qty"]) > 0 for p in market["inventory"].values()):
                 blocked.update(market["tokens"])
         for leg in self.state["pending_legs"].values():
@@ -422,7 +423,8 @@ class HedgeExit:
         if not trade_id or not condition or not legs:
             return
         matched = value(event, "matched_at", "match_time", "matchtime")
-        if matched is None and self.state.get("snapshot_only"):
+        inventory_since = self.state["markets"].get(condition, {}).get("inventory_since", 0)
+        if matched is None and (self.state.get("snapshot_only") or inventory_since):
             # An undated WS event might already be in the baseline. Let REST
             # provide its original match time rather than adding it speculatively.
             self.last_poll = 0
@@ -436,7 +438,7 @@ class HedgeExit:
                 except (ValueError, TypeError):
                     from datetime import datetime
                     matched = datetime.fromisoformat(str(matched).replace("Z", "+00:00")).timestamp()
-            if matched < self.state["since"]:
+            if matched < max(self.state["since"], inventory_since):
                 return
         if status not in ("CONFIRMED", "FAILED"):
             if trade_id in self.state["terminal_trades"]:
@@ -492,6 +494,7 @@ class HedgeExit:
                     "early": early or bool(old and old["early"]),
                 }
                 if early and not old:
+                    market["scan_only"] = False
                     market["immediate"], market["next_quote"] = True, 0
                     log.info("[HEDGE EARLY] trade=%s token=%s shares=%s", trade_id, token, quantity)
             self._persist()
@@ -524,6 +527,7 @@ class HedgeExit:
                 if old_qty == 0:
                     inv["first"] = pending["first"] if pending and pending["early"] else time.time()
                 if order_id not in self.state["owned_orders"] and not (pending and pending["early"]):
+                    market["scan_only"] = False
                     market["immediate"] = True
                     market["next_quote"] = 0
             elif quantity <= old_qty:
@@ -553,6 +557,110 @@ class HedgeExit:
         self.state["cursor"] = int(now)
         self.last_poll = now
         self._persist()
+
+    def _poll_merge_positions(self):
+        """Discover pairs outside the journal; never overwrite live reservations."""
+        positions = {}
+        for page in self.client.list_positions(size_threshold=0, page_size=100):
+            for pos in page.items:
+                quantity = dec(value(pos, "size"))
+                if quantity < 0:
+                    raise ValueError("Negative merge-scan position")
+                if quantity < UNIT:
+                    continue
+                condition = str(value(pos, "condition_id", "conditionId", default=""))
+                token = str(value(pos, "asset_id", "token_id", "asset", default=""))
+                if not condition or not token:
+                    raise ValueError("Incomplete merge-scan position")
+                holdings = positions.setdefault(condition, {})
+                if token in holdings:
+                    raise ValueError("Duplicate merge-scan position; retry a stable snapshot")
+                holdings[token] = pos
+        candidates = sum(len(p) >= 2 for p in positions.values())
+        log.info("[HEDGE POSITIONS SCAN] markets=%s paired_candidates=%s", len(positions), candidates)
+        for condition, holdings in positions.items():
+            if self.stopping.is_set():
+                return
+            if len(holdings) < 2:
+                continue
+            try:
+                market = self._market(condition)
+                if set(holdings) != set(market["tokens"]):
+                    raise ValueError("Merge-scan tokens do not match this condition")
+                # A historical replay also repairs fills missed beyond the
+                # ordinary 120-second overlap, without touching signed orders.
+                after = max(self.state["since"], market.get("inventory_since", 0)) - 1
+                for page in self.client.list_account_trades(market=condition, after=str(after)):
+                    for event in page.items:
+                        self.ingest(event)
+                if (market["order"] or market["tx"] or market["blocked"]
+                        or market.get("recover_sell") or self._waiting(condition)
+                        or market.get("merge_scan")):
+                    log.info("[HEDGE SCAN DEFERRED] condition=%s active exit, transaction or unsettled trades", condition)
+                    continue
+                if min(dec(p["qty"]) for p in market["inventory"].values()) >= UNIT:
+                    continue  # the normal partial-merge path already owns these pairs
+                if min(self._chain_quantities(condition)) < UNIT:
+                    continue  # do not cancel healthy reward orders on an old API snapshot
+                prices = {t: dec(value(p, "avg_price", "avgPrice")) for t, p in holdings.items()}
+                if any(not ZERO <= p <= ONE for p in prices.values()):
+                    raise ValueError("Invalid merge-scan entry price")
+                market["merge_scan"] = {"prices": {t: str(p) for t, p in prices.items()}}
+                self._persist()  # block new reward orders before draining old ones
+            except Exception as exc:
+                log.error("[HEDGE SCAN RETRY] condition=%s | %s", condition, exc)
+                if self.fatal:
+                    raise
+
+    def _refresh_merge_positions(self, condition, market):
+        """Rebase only an idle, drained condition to actual chain holdings."""
+        if market["order"] or market["tx"] or market["blocked"] or market.get("recover_sell"):
+            market.pop("merge_scan", None)
+            self._persist()
+            return False
+        if not self._quiesce(condition, market):
+            return True
+        after = max(self.state["since"], market.get("inventory_since", 0)) - 1
+        for page in self.client.list_account_trades(market=condition, after=str(after)):
+            for event in page.items:
+                self.ingest(event)
+        if self._waiting(condition) or market["blocked"] or market.get("recover_sell"):
+            market.pop("merge_scan", None)
+            self._persist()
+            return True
+        quantities = self._chain_quantities(condition)
+        previous = [dec(market["inventory"][t]["qty"]) for t in market["tokens"]]
+        prices = market.pop("merge_scan")["prices"]
+        # A stale positions API response after a merge cannot resurrect shares.
+        # An unchanged ledger needs no new baseline or time fence at all.
+        if min(quantities) < UNIT or tuple(previous) == quantities:
+            self._persist()
+            return False
+        start = int(time.time()) + 1
+        if not any(previous):
+            market["scan_only"] = True  # discovery alone must never create a BUY
+        for token, quantity in zip(market["tokens"], quantities):
+            old = market["inventory"][token]
+            old_qty = dec(old["qty"])
+            # Keep the known cost basis and holding clock. An indexer's older
+            # average must not move an existing exit's price protection.
+            retained_cost = dec(old["cost"]) * min(old_qty, quantity) / old_qty if old_qty else ZERO
+            added_cost = max(ZERO, quantity - old_qty) * dec(prices[token])
+            market["inventory"][token] = {
+                "qty": str(quantity), "cost": str(retained_cost + added_cost),
+                "first": old["first"] if old_qty > 0 else start,
+            }
+        market["inventory_since"] = start
+        self._persist()
+        log.info("[HEDGE SCAN RECONCILED] condition=%s shares=%s merge_only=%s",
+                 condition, "/".join(str(q) for q in quantities), market.get("scan_only", False))
+        return True  # wait for the per-condition timestamp boundary
+
+    def _chain_quantities(self, condition):
+        quantities = tuple(dec(q) for q in self.sdk.balances(condition))
+        if len(quantities) != 2 or any(q < 0 for q in quantities):
+            raise ValueError("Invalid merge-scan chain balances")
+        return tuple(q.quantize(UNIT, rounding=ROUND_DOWN) for q in quantities)
 
     def _order_book(self, condition, token):
         """Limit missing-book logs, while keeping recovery checks running."""
@@ -594,6 +702,15 @@ class HedgeExit:
                 raise
         if time.time() - self.last_poll >= self.cfg.hedge_poll_interval:
             self._poll_trades()
+        interval = getattr(self.cfg, "hedge_merge_scan_interval", 60)
+        if interval and time.monotonic() - self.last_merge_scan >= interval:
+            self.last_merge_scan = time.monotonic()
+            try:
+                self._poll_merge_positions()
+            except Exception as exc:
+                log.error("[HEDGE SCAN RETRY] positions query failed | %s", exc)
+                if self.fatal:
+                    raise
         self.ready = True
         for condition, market in list(self.state["markets"].items()):
             if self.stopping.is_set():
@@ -912,6 +1029,8 @@ class HedgeExit:
             self._post(market)
 
     def _step_market(self, condition, market):
+        if time.time() < market.get("inventory_since", 0):
+            return
         if market["tx"] and market.get("recover_sell"):
             order = market["order"]
             if (order and order.get("side", "BUY") == "BUY" and order["state"] == "live"
@@ -924,6 +1043,16 @@ class HedgeExit:
         self._reservation(market)
         if market["blocked"]:
             return
+        if market.get("merge_scan"):
+            try:
+                if self._refresh_merge_positions(condition, market):
+                    return
+            except Exception as exc:
+                if self.fatal:
+                    raise
+                market.pop("merge_scan", None)
+                self._persist()
+                log.error("[HEDGE SCAN RETRY] condition=%s refresh failed | %s", condition, exc)
         positions = self._positions(condition, market)
         if (not any(dec(p["qty"]) > 0 for p in positions.values())
                 and not market["order"] and not market["draining_orders"] and not market.get("recover_sell")):
@@ -936,6 +1065,8 @@ class HedgeExit:
         # Recycle filled pairs before the next quote or funding check, even
         # while the unfilled remainder of a verified BUY is still resting.
         if self._merge_pairs(condition, market):
+            return
+        if market.get("scan_only"):
             return
         tokens = market["tokens"]
         positions = self._positions(condition, market)  # quiesce may ingest a late source fill

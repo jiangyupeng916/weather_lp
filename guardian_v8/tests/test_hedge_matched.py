@@ -327,7 +327,7 @@ def test_version_one_journal_migrates_without_replaying_existing_inventory(env):
     engine.cfg.hedge_trigger = "matched"
     recovered = HedgeExit(client, engine.cfg, engine.journal.path, lambda: None, sdk=sdk)
     try:
-        assert recovered.state["version"] == 2
+        assert recovered.state["version"] == 3
         assert recovered.state["seen"] == old_seen
         source(recovered, "CONFIRMED")
         recovered.last_poll = time.time()

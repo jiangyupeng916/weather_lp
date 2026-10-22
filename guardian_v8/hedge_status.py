@@ -12,7 +12,7 @@ def summarize(state):
                                    if p["condition"] == condition and p["token"] == t and p["early"]), Decimal(0)))
                        for t in market["tokens"]}
         if not (market["order"] or market["tx"] or market["blocked"]
-                or market["draining_orders"] or market.get("recover_sell")
+                or market["draining_orders"] or market.get("recover_sell") or market.get("merge_scan")
                 or any(Decimal(p) for p in provisional.values())
                 or any(Decimal(p["qty"]) for p in market["inventory"].values())):
             continue
@@ -24,6 +24,9 @@ def summarize(state):
             "transaction": market["tx"], "blocked": market["blocked"],
             "draining_orders": market["draining_orders"],
             "recover_sell": market.get("recover_sell", False), "provisional": provisional,
+            "merge_scan": bool(market.get("merge_scan")),
+            "scan_only": market.get("scan_only", False),
+            "inventory_since": market.get("inventory_since", 0),
         })
     return {"wallet": state["wallet"], "enabled": state["enabled"],
             "trigger": state.get("trigger", "confirmed"),

@@ -46,6 +46,18 @@ def test_startup_defaults_to_live_positions_and_resume_remains_available(monkeyp
         config(hedge_startup_mode="invalid").validate()
 
 
+def test_merge_scan_defaults_env_disable_and_valid_intervals(monkeypatch):
+    monkeypatch.delenv("HEDGE_MERGE_SCAN_INTERVAL", raising=False)
+    assert Config().hedge_merge_scan_interval == 60
+    monkeypatch.setenv("HEDGE_MERGE_SCAN_INTERVAL", "30")
+    assert Config().hedge_merge_scan_interval == 30
+    for interval in (0, 5, 60, 86400):
+        config(hedge_merge_scan_interval=interval).validate()
+    for interval in (-1, 1, float("nan"), float("inf"), 86401):
+        with pytest.raises(EnvironmentError, match="HEDGE_MERGE_SCAN_INTERVAL"):
+            config(hedge_merge_scan_interval=interval).validate()
+
+
 def test_mode_requires_relayer_pair_and_valid_values():
     with pytest.raises(EnvironmentError, match="EXIT_MODE"):
         config(exit_mode="typo").validate()
