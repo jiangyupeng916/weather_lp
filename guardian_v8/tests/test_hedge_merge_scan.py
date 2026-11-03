@@ -251,7 +251,7 @@ def test_scan_rebase_cutoff_and_merge_only_mode_survive_resume(env):
     scan(engine)
     before = copy.deepcopy(engine.state["markets"]["condition"])
     engine.close()
-    recovered = HedgeExit(client, engine.cfg, engine.journal.path, lambda: None, sdk=sdk)
+    recovered = HedgeExit(client, engine.cfg, engine.journal.path, lambda: None, sdk=sdk, positions=client)
     try:
         assert recovered.state["version"] == 3
         assert recovered.state["markets"]["condition"] == before
@@ -373,7 +373,7 @@ def test_deferred_scan_with_no_ledger_exposure_survives_resume(env):
     scan(engine)
     assert engine.state["markets"]["condition"]["merge_scan"]
     engine.close()
-    recovered = HedgeExit(client, engine.cfg, engine.journal.path, lambda: None, sdk=sdk)
+    recovered = HedgeExit(client, engine.cfg, engine.journal.path, lambda: None, sdk=sdk, positions=client)
     try:
         assert recovered.blocks("yes")
         recovered.step()

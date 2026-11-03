@@ -253,7 +253,7 @@ def test_recovery_sell_unknown_response_and_restart_keep_same_signed_order(early
     payload = copy.deepcopy(sdk.posts[-1])
     path = engine.journal.path
     engine.close()
-    recovered = HedgeExit(client, engine.cfg, path, lambda: None, sdk=sdk)
+    recovered = HedgeExit(client, engine.cfg, path, lambda: None, sdk=sdk, positions=client)
     try:
         recovered.last_poll = time.time()
         recovered.step()
@@ -270,7 +270,7 @@ def test_early_journal_survives_restart_without_rebuy(early):
     engine.step()
     path = engine.journal.path
     engine.close()
-    recovered = HedgeExit(client, engine.cfg, path, lambda: None, sdk=sdk)
+    recovered = HedgeExit(client, engine.cfg, path, lambda: None, sdk=sdk, positions=client)
     try:
         recovered.last_poll = time.time()
         recovered.step()
@@ -287,7 +287,7 @@ def test_cannot_disable_matched_while_provisional_fill_is_unresolved(early):
     engine.close()
     engine.cfg.hedge_trigger = "confirmed"
     with pytest.raises(RuntimeError, match="Unsettled early"):
-        HedgeExit(client, engine.cfg, engine.journal.path, lambda: None, sdk=sdk)
+        HedgeExit(client, engine.cfg, engine.journal.path, lambda: None, sdk=sdk, positions=client)
 
 
 def test_changed_pending_leg_freezes_instead_of_overhedging(early):
@@ -325,7 +325,7 @@ def test_version_one_journal_migrates_without_replaying_existing_inventory(env):
     engine.journal.write(engine.state)
     engine.close()
     engine.cfg.hedge_trigger = "matched"
-    recovered = HedgeExit(client, engine.cfg, engine.journal.path, lambda: None, sdk=sdk)
+    recovered = HedgeExit(client, engine.cfg, engine.journal.path, lambda: None, sdk=sdk, positions=client)
     try:
         assert recovered.state["version"] == 3
         assert recovered.state["seen"] == old_seen

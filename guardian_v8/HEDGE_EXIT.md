@@ -2,6 +2,18 @@
 
 `EXIT_MODE=hedge_merge` 根据已成交的份额买入同一市场的相反 outcome，再把确认的等量 YES、NO 合并成抵押资产。触发点由 `HEDGE_TRIGGER` 选择：默认 `confirmed` 等成交确认；`matched` 提前到撮合事件。原模式 `EXIT_MODE=sell` 仍为默认值。
 
+### 2026-11-03：持仓查询迁移至 Data API v2
+
+Data API v1 已于 2026-11-02 退役。旧代码的 `HEDGE SCAN RETRY ... Data API v1 has been retired` 来自旧 SDK 的持仓读取接口，不是合并失败或限流；启动取持仓和原 `sell` 模式也受影响。更新代码并重启即可，无需修改 `.env` 或清除状态文件。
+
+启动取持仓、定时补合并和旧卖出模式现在统一通过 `data_api.py` 直接只读调用 `GET https://data-api.polymarket.com/v2/positions`。按官方 `data` / `pagination` 格式解析，沿原样 `next_cursor` 继续翻页，每页保留钱包、状态及过滤参数，不发送已废弃的 `offset`、`market` 或 `sizeThreshold`。份额过滤改为 `filter_type=TOKENS` + `filter_amount`；启动与合并扫描传 `0` 保留小额配对，旧卖出模式沿用 `position_threshold`。
+
+`token_id` 映射为内部 `asset_id`，`current_size` 映射为剩余份额 `size`，`condition_id` / `avg_price` 直接使用。**`total_size` 是累计买入份额，绝不用作当前持仓或补买量。** 金额与份额使用 Decimal 解析；缺失/非法数值、错误钱包、重复条目、缺失或循环游标、HTTP 错误及分页中途失败都按失败处理，不当作完整空仓。旧卖出模式读取失败时保留持仓计时；成功读取到空仓时仍正常清理。
+
+本次只迁移公开的持仓读取。下单、撤单、CLOB 已认证成交查询、买价反转、部分合并、签名和在途交易恢复仍沿用已核验的 SDK 路径。依赖继续固定 `polymarket-client==0.9.0`，保留 `0.5.0` 兼容；不需要为这次修复升级 SDK。官方 SDK 从 `0.10.0` 起原生支持 Data API v2，但整包升级还涉及其他破坏性改动，当前项目不通过旧 SDK 的 `list_positions` 读取持仓，也不回退到已退役的 v1。
+
+实现依据：[v1 → v2 迁移](https://docs.polymarket.com/migrate/data-api-v1-to-v2)、[v2 持仓字段与过滤](https://docs.polymarket.com/api-reference/wallet/list-positions-for-a-user-or-market)、[游标与数值约定](https://docs.polymarket.com/api-reference/data-api/overview)。已用官方示例公开地址只读核对实际 v2 返回结构；未启动实盘机器人或发送交易。
+
 **当前默认启动方式为 `HEDGE_STARTUP_MODE=positions`**：每次启动归档上次本地记录，仅用持仓接口返回的当前份额、均价重新建立退出任务，不要求持仓接口与链上份额完全一致。已有 YES/NO 等量配对可合并；单边净缺口继续按原阈值买入相反方向，不继续重发旧文件中的订单。人工卖出后的持仓接口可能稍晚更新，初始化以接口本次返回值为准。
 
 本次简化初始化前的完整代码保存在 Git 提交 `9463d4a`。未修改真实 `.env`，未运行实盘订单。
@@ -165,12 +177,12 @@ grep -E 'HEDGE FILL|HEDGE MERGED' data/bot1/trades.log
 - [Fees](https://docs.polymarket.com/trading/fees)：主动成交费用说明。
 - [SDK Changelog](https://docs.polymarket.com/changelog/sdks)：Python `0.9.0` 的 asset/condition 别名、新协议订单和合并支持。
 - [Get Order Book](https://docs.polymarket.com/api-reference/market-data/get-order-book)：`No orderbook exists for the requested token id` 是订单簿接口的 404 错误；与请求超时、限流或其他 404 分开处理。
-- [Get Current Positions](https://docs.polymarket.com/api-reference/core/get-current-positions-for-a-user)：当前持仓的 `asset`、`conditionId`、`size`、`avgPrice`；本项目固定 SDK 版本映射为 `asset_id` / `token_id`、`condition_id`、`size`、`avg_price`。
+- [List Positions v2](https://docs.polymarket.com/api-reference/wallet/list-positions-for-a-user-or-market)：公开持仓读取使用 `token_id`、`condition_id`、`current_size`、`avg_price`，由 `data_api.py` 映射为原策略内部字段；旧 v1 接口已退役。
 
 离线验证命令：
 
 ```bash
-python -m compileall -q config.py guardian.py execution.py ws_router.py hedge_exit.py hedge_sdk.py hedge_status.py
+python -m compileall -q data_api.py config.py guardian.py execution.py ws_router.py hedge_exit.py hedge_sdk.py hedge_status.py
 python -m pytest tests -q
 ```
 

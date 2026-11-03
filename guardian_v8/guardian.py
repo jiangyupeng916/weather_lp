@@ -38,6 +38,7 @@ from scheduler import PeriodicScheduler
 from background import BackgroundDispatcher
 from wss import BidCache, MarketWS
 from hedge_exit import HedgeExit, ensure_sell_safe
+from data_api import DataApiV2
 
 logger = logging.getLogger("guardian")
 
@@ -76,6 +77,7 @@ class Guardian:
         )
         # wallet 属性：SDK 解析后的实际链上地址（Deposit Wallet / Proxy Wallet / EOA）
         self.address = self.client.wallet
+        self.position_reader = DataApiV2(self.address, self.cfg.data_api)
 
         # ── 组件初始化（按依赖顺序） ───────────────────────────────────────────
         # V8：HeartbeatManager 不再接收 creds 参数，内部从 cfg 读取
@@ -143,7 +145,7 @@ class Guardian:
         if self.cfg.exit_mode == "hedge_merge":
             self.hedge_exit = HedgeExit(self.client, self.cfg, hedge_path,
                                         self.exec_layer._rate_wait, self.trade_logger,
-                                        maker_busy=self.exec_layer.maker_busy)
+                                        maker_busy=self.exec_layer.maker_busy, positions=self.position_reader)
             self.exec_layer.place_guard = lambda token: self.running and not self._hedge_blocks(token)
             self.exec_layer.exit_order_owned = self.hedge_exit.owns
         else:
@@ -1111,17 +1113,13 @@ class Guardian:
                     self._ws_disconnect_count, downtime, uptime, avail)
 
     # ── 持仓查询 ──────────────────────────────────────────────────────────────
-    def positions(self) -> List[dict]:
+    def positions(self) -> Optional[List[dict]]:
         try:
-            r = requests.get(
-                f"{self.cfg.data_api}/positions",
-                params={"user": self.address, "sizeThreshold": self.cfg.position_threshold},
-                timeout=10,
-            )
-            return r.json() if r.status_code == 200 else []
+            return [p.legacy_fields() for page in self.position_reader.list_positions(
+                size_threshold=self.cfg.position_threshold, page_size=100) for p in page.items]
         except Exception as e:
             logger.error("查询持仓失败: %s", e)
-            return []
+            return None
 
     def onchain_balance(self, token_id: str) -> Optional[float]:
         """查询条件代币链上余额；查询失败返回 None（区别于「真的 0 持仓」）。
@@ -1447,6 +1445,8 @@ class Guardian:
             engine.wake.set()
             return
         pos_list = self.positions()
+        if pos_list is None:
+            return  # A failed/incomplete snapshot must not reset holding clocks.
 
         # ── 持仓首见计时维护（V8.4 超时强平）──────────────────────────────────
         # 每轮同步 _holding_since：新持仓记当前时间，已消失（卖光）的清理。

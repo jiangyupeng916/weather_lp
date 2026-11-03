@@ -17,7 +17,7 @@ def live(env):
     previous.close()
     previous.cfg.hedge_startup_mode = "positions"
     sdk.wallet_balances = (D(0), D(0))
-    engine = HedgeExit(client, previous.cfg, previous.journal.path, lambda: None, sdk=sdk)
+    engine = HedgeExit(client, previous.cfg, previous.journal.path, lambda: None, sdk=sdk, positions=client)
     yield engine, client, sdk
     engine.stop()
     engine.close()
@@ -111,7 +111,7 @@ def test_prior_journal_is_archived_without_parsing_even_if_corrupt(env, monkeypa
     previous.close()
     previous.cfg.hedge_startup_mode = "positions"
     monkeypatch.setattr(Journal, "read", Mock(side_effect=AssertionError("Do not load old state")))
-    engine = HedgeExit(client, previous.cfg, path, lambda: None, sdk=sdk)
+    engine = HedgeExit(client, previous.cfg, path, lambda: None, sdk=sdk, positions=client)
     try:
         assert not engine.state["markets"] and not engine.state["owned_orders"]
         assert not engine.state["seen"] and not engine.state["pending_legs"]
@@ -129,7 +129,7 @@ def test_archive_failure_does_not_overwrite_old_state_or_leave_the_lock_held(env
     previous.cfg.hedge_startup_mode = "positions"
     monkeypatch.setattr(Journal, "archive", Mock(side_effect=OSError("archive unavailable")))
     with pytest.raises(OSError, match="archive unavailable"):
-        HedgeExit(client, previous.cfg, path, lambda: None, sdk=sdk)
+        HedgeExit(client, previous.cfg, path, lambda: None, sdk=sdk, positions=client)
     assert path.read_bytes() == content
     lock = Journal(path)
     lock.close()
@@ -145,7 +145,7 @@ def test_restart_after_manual_cleanup_ignores_old_unknown_signed_order(env):
     previous.cfg.hedge_startup_mode = "positions"
     sdk.post_timeout = False
     holdings(client, sdk, yes="0", no="8")
-    engine = HedgeExit(client, previous.cfg, previous.journal.path, lambda: None, sdk=sdk)
+    engine = HedgeExit(client, previous.cfg, previous.journal.path, lambda: None, sdk=sdk, positions=client)
     try:
         activate(engine)
         assert len(sdk.posts) == 2 and sdk.posts[-1] != old_payload

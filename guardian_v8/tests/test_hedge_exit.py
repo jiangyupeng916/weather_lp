@@ -162,7 +162,7 @@ def env(tmp_path):
     sdk = PaperSDK(client)
     cfg = NS(hedge_poll_interval=5, hedge_startup_mode="resume", position_interval=120, max_hold_enabled=False,
              max_hold_hours=4, sell_min_bid_gap=D("0.02"), sell_position_gap=D("0.02"))
-    engine = HedgeExit(client, cfg, tmp_path / "state.json", lambda: None, sdk=sdk)
+    engine = HedgeExit(client, cfg, tmp_path / "state.json", lambda: None, sdk=sdk, positions=client)
     engine.state.update(initialized=True, since=0)
     engine.last_poll = time.time()
     engine._persist()
@@ -374,7 +374,7 @@ def test_unknown_order_survives_restart_and_cannot_switch_to_sell(env):
     engine.close()
     with pytest.raises(RuntimeError, match="Unfinished"):
         ensure_sell_safe(path)
-    recovered = HedgeExit(client, engine.cfg, path, lambda: None, sdk=sdk)
+    recovered = HedgeExit(client, engine.cfg, path, lambda: None, sdk=sdk, positions=client)
     try:
         assert recovered.owns("hedge-1")
         recovered.last_poll = time.time()
@@ -392,7 +392,7 @@ def test_merge_never_resubmitted_while_pending_or_after_restart(env):
     engine.step()
     path = engine.journal.path
     engine.close()
-    recovered = HedgeExit(client, engine.cfg, path, lambda: None, sdk=sdk)
+    recovered = HedgeExit(client, engine.cfg, path, lambda: None, sdk=sdk, positions=client)
     try:
         recovered.last_poll = time.time()
         recovered.step()

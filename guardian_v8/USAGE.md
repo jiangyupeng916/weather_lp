@@ -172,6 +172,8 @@ SCREENER_TICK_SIZE=0.001
 
 完整参数、示例、超时退出差异与故障恢复见 [HEDGE_EXIT.md](HEDGE_EXIT.md)。只读查看进度：`python hedge_status.py`。
 
+**2026-11-03 Data API v2 兼容更新**：v1 于 11 月 2 日退役后，出现 `Data API v1 has been retired` 需要更新代码并重启。启动持仓、定时补合并和原卖出模式都已改用 `/v2/positions`，自动处理 `data` 包装、游标分页及 `current_size` 等新字段。无需修改 `.env`、删除账本或升级现有 SDK；交易依赖仍固定 `polymarket-client==0.9.0`，公开持仓读取已独立迁移。查询或分页失败不会当作空仓，也不会重置旧卖出模式的持仓计时。细节见 [HEDGE_EXIT.md](HEDGE_EXIT.md)。
+
 ## 4. 多账户运行（bot1 + bot2）
 
 Guardian V8 支持**同时运行多个账户**，每个账户是完全独立的实例：读各自的 `.env.<instance>` 凭据，写各自的 `data/<instance>/` 日志与状态，互不共享内存、互不干扰。

@@ -15,6 +15,7 @@ import time
 from decimal import Decimal, ROUND_DOWN
 
 from hedge_sdk import HedgeSDK
+from data_api import DataApiV2
 
 log = logging.getLogger("guardian.hedge")
 ZERO = Decimal(0)
@@ -172,9 +173,11 @@ def ensure_sell_safe(path):
 
 
 class HedgeExit:
-    def __init__(self, client, cfg, path, rate_wait, trade_logger=None, sdk=None, maker_busy=None):
+    def __init__(self, client, cfg, path, rate_wait, trade_logger=None, sdk=None, maker_busy=None, positions=None):
         self.client, self.cfg = client, cfg
         self.sdk = sdk or HedgeSDK(client, rate_wait)
+        self.positions = positions if positions is not None else DataApiV2(
+            client.wallet, getattr(cfg, "data_api", "https://data-api.polymarket.com"))
         self.maker_busy = maker_busy or (lambda tokens: False)
         self.trade_logger = trade_logger or log
         self.journal = Journal(path)
@@ -310,7 +313,7 @@ class HedgeExit:
         # snapshot would double-count trades. Require a clean activation once.
         start = int(time.time())
         markets = set()
-        for page in self.client.list_positions(size_threshold=0, page_size=100):
+        for page in self.positions.list_positions(size_threshold=0, page_size=100):
             for pos in page.items:
                 if pos.size is not None and dec(pos.size) > 0:
                     markets.add(str(pos.condition_id))
@@ -334,7 +337,7 @@ class HedgeExit:
         """Use current Data API shares and entry prices as the sole baseline."""
         positions = {}
         conditions = set()
-        for page in self.client.list_positions(size_threshold=0, page_size=100):
+        for page in self.positions.list_positions(size_threshold=0, page_size=100):
             for pos in page.items:
                 if value(pos, "size") is None:
                     raise ValueError("Missing startup position size")
@@ -561,7 +564,7 @@ class HedgeExit:
     def _poll_merge_positions(self):
         """Discover pairs outside the journal; never overwrite live reservations."""
         positions = {}
-        for page in self.client.list_positions(size_threshold=0, page_size=100):
+        for page in self.positions.list_positions(size_threshold=0, page_size=100):
             for pos in page.items:
                 quantity = dec(value(pos, "size"))
                 if quantity < 0:

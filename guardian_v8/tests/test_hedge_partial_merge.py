@@ -214,7 +214,7 @@ def test_partial_merge_survives_resume_without_a_second_submission(env):
     oid = market["order"]["id"]
     path = engine.journal.path
     engine.close()
-    recovered = HedgeExit(client, engine.cfg, path, lambda: None, sdk=sdk)
+    recovered = HedgeExit(client, engine.cfg, path, lambda: None, sdk=sdk, positions=client)
     try:
         recovered.last_poll = time.time()
         recovered.step()

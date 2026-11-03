@@ -16,6 +16,7 @@ Guardian V8 是一个基于 [Polymarket CLOB](https://docs.polymarket.com) 平�
 - **提供流动性**：在多个市场挂买单，赚取平台 maker 返利奖励
 - **快速平仓**：买入成交后立即卖出（两级卖出策略），保持资金循环
 - **可选反向退出**：`EXIT_MODE=hedge_merge` 买入反向净份额并合并，配置与限制见 [HEDGE_EXIT.md](HEDGE_EXIT.md)
+- **Data API v2**：持仓读取已迁至 `/v2/positions`，兼容 v1 在 2026-11-02 退役；自动处理新字段和游标分页，无需改变交易 SDK 或 `.env`。
 - **风险控制**：纯 Maker 模式（Post-Only），不吃单不付 taker 费用
 
 ### 技术栈
